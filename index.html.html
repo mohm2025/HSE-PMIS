@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SafeSite PMIS — HSE Performance System</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --or:#E8641A;--orl:#FDF0E8;--ord:#B84D10;
+  --gr:#1D9E75;--grl:#E1F5EE;
+  --re:#E24B4A;--rel:#FCEBEB;
+  --am:#BA7517;--aml:#FAEEDA;
+  --bl:#185FA5;--bll:#E6F1FB;
+  --bg:#F8F7F5;--card:#fff;--bdr:rgba(0,0,0,0.1);
+  --tx:#1a1a1a;--mu:#666;
+}
+@media(prefers-color-scheme:dark){:root{--bg:#1a1a1a;--card:#242424;--bdr:rgba(255,255,255,0.1);--tx:#f0f0f0;--mu:#999;--orl:#2a1a0e;--grl:#0a1f18;--rel:#2a0e0e;--aml:#1f1408;--bll:#0a1525;}}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx);min-height:100vh;}
+.topbar{background:var(--card);border-bottom:1px solid var(--bdr);padding:0 20px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;z-index:100;}
+.logo{display:flex;align-items:center;gap:10px;}
+.logo-icon{width:32px;height:32px;background:var(--or);border-radius:8px;display:flex;align-items:center;justify-content:center;}
+.logo-text{font-size:14px;font-weight:600;}
+.logo-sub{font-size:10px;color:var(--mu);font-family:monospace;}
+.topbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.site-badge{background:var(--orl);color:var(--ord);padding:3px 8px;border-radius:5px;font-size:11px;font-family:monospace;}
+.sync-row{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mu);font-family:monospace;}
+.sync-dot{width:6px;height:6px;border-radius:50%;background:var(--gr);}
+.config-bar{background:#FDF0E8;border-bottom:1px solid #F5C4A0;padding:10px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.config-label{font-size:12px;color:var(--ord);font-weight:500;}
+.config-input{padding:6px 10px;border:1px solid #F5C4A0;border-radius:6px;font-size:12px;background:#fff;color:var(--tx);font-family:monospace;width:380px;max-width:100%;}
+.config-btn{padding:6px 14px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;border:none;background:var(--or);color:#fff;font-family:system-ui,sans-serif;}
+.config-btn:hover{background:var(--ord);}
+.export-bar{background:var(--card);border-bottom:1px solid var(--bdr);padding:8px 20px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.export-label{font-size:11px;color:var(--mu);font-family:monospace;text-transform:uppercase;letter-spacing:.04em;margin-right:4px;}
+.btn-exp{padding:6px 14px;border-radius:7px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--bdr);background:var(--card);color:var(--tx);font-family:system-ui,sans-serif;display:flex;align-items:center;gap:6px;transition:all .15s;}
+.btn-exp:hover{background:var(--bg);}
+.btn-exp.xl{background:var(--grl);color:#0F6E56;border-color:#1D9E75;}
+.btn-exp.xl:hover{background:#C9EDE0;}
+.btn-exp.csv{background:var(--bll);color:#185FA5;border-color:#185FA5;}
+.btn-exp.csv:hover{background:#CDDFF5;}
+.nav-tabs{background:var(--card);border-bottom:1px solid var(--bdr);display:flex;padding:0 20px;gap:4px;}
+.nav-tab{padding:10px 14px;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;color:var(--mu);background:none;border-top:none;border-left:none;border-right:none;font-family:system-ui,sans-serif;}
+.nav-tab.active{color:var(--or);border-bottom-color:var(--or);}
+.main{padding:20px;max-width:1400px;margin:0 auto;}
+.sec{display:none;}.sec.active{display:block;}
+.page-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
+.page-title{font-size:19px;font-weight:600;}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px;}
+.kpi{background:var(--card);border:1px solid var(--bdr);border-radius:12px;padding:14px;}
+.kpi.danger{border-left:3px solid var(--re);}.kpi.warning{border-left:3px solid var(--am);}.kpi.success{border-left:3px solid var(--gr);}.kpi.info{border-left:3px solid var(--bl);}
+.kpi-lb{font-size:11px;color:var(--mu);font-family:monospace;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;}
+.kpi-val{font-size:26px;font-weight:600;}
+.chart-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px;}
+.chart-card{background:var(--card);border:1px solid var(--bdr);border-radius:12px;padding:18px;}
+.chart-title{font-size:11px;font-weight:500;color:var(--mu);margin-bottom:14px;font-family:monospace;text-transform:uppercase;letter-spacing:.03em;}
+.tbl-wrap{background:var(--card);border:1px solid var(--bdr);border-radius:12px;overflow:hidden;margin-bottom:18px;}
+.tbl-hdr{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--bdr);flex-wrap:wrap;gap:8px;}
+.tbl-title{font-size:13px;font-weight:500;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th{padding:9px 18px;text-align:left;font-size:11px;font-weight:500;color:var(--mu);background:var(--bg);font-family:monospace;text-transform:uppercase;border-bottom:1px solid var(--bdr);}
+td{padding:11px 18px;border-bottom:1px solid var(--bdr);vertical-align:middle;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:var(--bg);cursor:pointer;}
+.badge{display:inline-flex;align-items:center;padding:3px 7px;border-radius:4px;font-size:11px;font-weight:500;font-family:monospace;}
+.open{background:var(--rel);color:var(--re);}.closed{background:var(--grl);color:var(--gr);}.overdue{background:var(--aml);color:var(--am);}.inprogress{background:var(--bll);color:var(--bl);}
+.cu{background:var(--rel);color:var(--re);}.cn{background:var(--aml);color:var(--am);}.cp{background:var(--bll);color:var(--bl);}.ce{background:var(--grl);color:var(--gr);}.cf{background:#FDE8E8;color:#9B1C1C;}.cpos{background:var(--grl);color:var(--gr);}
+.pdot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;}
+.ph{background:var(--re);}.pm{background:var(--am);}.pl{background:var(--gr);}
+.btn{padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--bdr);background:var(--card);color:var(--tx);font-family:system-ui,sans-serif;}
+.btn:hover{background:var(--bg);}
+.btn-p{background:var(--or);color:#fff;border-color:var(--or);}
+.btn-p:hover{background:var(--ord);}
+.btn-sm{padding:5px 10px;font-size:11px;}
+.fi,.fse-f{padding:6px 10px;border:1px solid var(--bdr);border-radius:6px;font-size:12px;background:var(--bg);color:var(--tx);font-family:system-ui,sans-serif;}
+.modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:200;}
+.modal{background:var(--card);border-radius:16px;width:640px;max-width:95vw;max-height:90vh;overflow-y:auto;border:1px solid var(--bdr);}
+.modal-hd{padding:18px 22px 14px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:var(--card);z-index:1;}
+.modal-t{font-size:15px;font-weight:600;}
+.modal-bd{padding:22px;}
+.modal-ft{padding:14px 22px;border-top:1px solid var(--bdr);display:flex;justify-content:flex-end;gap:10px;}
+.xbtn{background:none;border:none;cursor:pointer;font-size:18px;color:var(--mu);}
+.frow{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+.fg{margin-bottom:14px;}
+.flb{display:block;font-size:11px;font-weight:500;color:var(--mu);margin-bottom:5px;font-family:monospace;text-transform:uppercase;letter-spacing:.03em;}
+.fin,.fse,.fta{width:100%;padding:9px 11px;border:1px solid var(--bdr);border-radius:7px;font-size:13px;background:var(--bg);color:var(--tx);font-family:system-ui,sans-serif;}
+.fta{min-height:75px;resize:vertical;}
+.phu{border:2px dashed var(--bdr);border-radius:10px;padding:20px;text-align:center;cursor:pointer;background:var(--bg);}
+.phu:hover{border-color:var(--or);background:var(--orl);}
+.pp{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
+.pth{width:68px;height:68px;border-radius:8px;object-fit:cover;border:1px solid var(--bdr);}
+.toast{position:fixed;bottom:20px;right:20px;padding:11px 18px;border-radius:10px;font-size:13px;font-weight:500;z-index:999;color:#fff;}
+.toast.s{background:var(--gr);}.toast.e{background:var(--re);}
+.loading{display:flex;align-items:center;justify-content:center;padding:40px;color:var(--mu);font-size:14px;}
+.spinner{width:18px;height:18px;border:2px solid var(--bdr);border-top-color:var(--or);border-radius:50%;animation:spin .8s linear infinite;margin-right:10px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.obs-id{font-family:monospace;font-size:11px;color:var(--mu);}
+.no-api{background:var(--aml);color:var(--am);padding:3px 8px;border-radius:4px;font-size:11px;font-family:monospace;margin-left:8px;}
+@media(max-width:700px){.chart-row{grid-template-columns:1fr;}.frow{grid-template-columns:1fr;}.main{padding:12px;}.export-bar{padding:6px 12px;}.topbar{padding:0 12px;}.config-input{width:100%;}}
+@media print{.topbar,.config-bar,.export-bar,.nav-tabs,.page-hdr button,.tbl-hdr button,.modal-ov{display:none!important;}.sec{display:block!important;}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">
+    <div class="logo-icon">
+      <svg width="18" height="18" fill="none" viewBox="0 0 20 20"><path d="M10 2L3 7v6l7 5 7-5V7L10 2z" fill="#fff" opacity=".9"/><path d="M10 6v5M10 13v.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </div>
+    <div>
+      <div class="logo-text">SafeSite PMIS</div>
+      <div class="logo-sub">HSE PERFORMANCE SYSTEM</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="sync-row"><div class="sync-dot" id="sdot"></div><span id="slbl">Local mode</span></div>
+    <span class="site-badge">RIYADH-TOWER-01</span>
+  </div>
+</div>
+
+<!-- API Configuration Bar -->
+<div class="config-bar" id="config-bar">
+  <span class="config-label">🔗 Connect Google Sheets:</span>
+  <input class="config-input" id="api-input" placeholder="Paste your Apps Script URL here: https://script.google.com/macros/s/.../exec">
+  <button class="config-btn" onclick="saveApiUrl()">Connect</button>
+  <button class="config-btn" onclick="dismissConfig()" style="background:transparent;color:var(--ord);border:1px solid var(--ord);">Skip (use offline)</button>
+</div>
+
+<div class="export-bar">
+  <span class="export-label">Export:</span>
+  <button class="btn-exp xl" onclick="exportExcel()">
+    <svg width="14" height="14" fill="none" viewBox="0 0 14 14"><rect x="1" y="1" width="12" height="12" rx="2" stroke="#0F6E56" stroke-width="1.2"/><path d="M4 5l2 2-2 2M7 9h3" stroke="#0F6E56" stroke-width="1.2" stroke-linecap="round"/></svg>
+    Excel (.xlsx)
+  </button>
+  <button class="btn-exp csv" onclick="exportCSV()">
+    <svg width="14" height="14" fill="none" viewBox="0 0 14 14"><rect x="1" y="1" width="12" height="12" rx="2" stroke="#185FA5" stroke-width="1.2"/><path d="M4 4h6M4 7h6M4 10h4" stroke="#185FA5" stroke-width="1.2" stroke-linecap="round"/></svg>
+    CSV → Google Sheets
+  </button>
+  <button class="btn-exp" onclick="window.print()" style="margin-left:auto;">
+    <svg width="14" height="14" fill="none" viewBox="0 0 14 14"><path d="M3 5V2h8v3M3 9H1V5h12v4h-2M3 9v3h8V9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+    Print
+  </button>
+</div>
+
+<div class="nav-tabs">
+  <button class="nav-tab active" onclick="switchTab('dashboard')">Dashboard</button>
+  <button class="nav-tab" onclick="switchTab('observations')">Observations</button>
+  <button class="nav-tab" onclick="switchTab('analytics')">Analytics</button>
+</div>
+
+<div class="main">
+
+  <!-- DASHBOARD -->
+  <div class="sec active" id="tab-dashboard">
+    <div class="page-hdr">
+      <div class="page-title">Safety Overview</div>
+      <button class="btn btn-p" onclick="openAdd()">+ New Observation</button>
+    </div>
+    <div id="d-load" class="loading"><div class="spinner"></div>Loading data...</div>
+    <div id="d-content" style="display:none;">
+      <div class="kpi-grid" id="kpi"></div>
+      <div class="chart-row">
+        <div class="chart-card"><div class="chart-title">By category</div><div style="position:relative;height:170px;"><canvas id="catC"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">Monthly trend</div><div style="position:relative;height:170px;"><canvas id="trendC"></canvas></div></div>
+      </div>
+      <div class="tbl-wrap">
+        <div class="tbl-hdr"><div class="tbl-title">Recent observations</div><button class="btn btn-sm" onclick="switchTab('observations')">View all</button></div>
+        <table><thead><tr><th>ID</th><th>Category</th><th>Description</th><th>Priority</th><th>Status</th><th>Due date</th></tr></thead><tbody id="d-tbody"></tbody></table>
+      </div>
+    </div>
+  </div>
+
+  <!-- OBSERVATIONS -->
+  <div class="sec" id="tab-observations">
+    <div class="page-hdr">
+      <div class="page-title">All Observations</div>
+      <button class="btn btn-p" onclick="openAdd()">+ New Observation</button>
+    </div>
+    <div class="tbl-wrap">
+      <div class="tbl-hdr">
+        <div class="tbl-title">Observation register</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <input class="fi" id="srch" placeholder="Search..." oninput="renderObs()" style="width:130px;">
+          <select class="fse-f" id="fst" onchange="renderObs()">
+            <option value="">All status</option><option>Open</option><option>In Progress</option><option>Closed</option><option>Overdue</option>
+          </select>
+          <select class="fse-f" id="fct" onchange="renderObs()">
+            <option value="">All categories</option><option>Unsafe Act</option><option>Near Miss</option><option>PPE Violation</option><option>Environmental</option><option>Fire Safety</option><option>Positive</option>
+          </select>
+          <button class="btn btn-sm" onclick="loadData()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="o-load" class="loading" style="display:none;"><div class="spinner"></div>Loading...</div>
+      <table><thead><tr><th>ID</th><th>Date</th><th>Category</th><th>Description</th><th>Priority</th><th>Status</th><th>Due</th><th>Closed</th><th>Actions</th></tr></thead><tbody id="o-tbody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- ANALYTICS -->
+  <div class="sec" id="tab-analytics">
+    <div class="page-title" style="margin-bottom:16px;">Analytics</div>
+    <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:18px;">
+      <div class="kpi success"><div class="kpi-lb">Closure rate</div><div class="kpi-val" style="color:var(--gr);" id="a-cl">0%</div></div>
+      <div class="kpi warning"><div class="kpi-lb">Avg days to close</div><div class="kpi-val" id="a-dy">—</div></div>
+      <div class="kpi danger"><div class="kpi-lb">Overdue rate</div><div class="kpi-val" style="color:var(--re);" id="a-od">0%</div></div>
+    </div>
+    <div class="chart-row">
+      <div class="chart-card"><div class="chart-title">Status breakdown</div><div style="position:relative;height:200px;"><canvas id="stC"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">Priority distribution</div><div style="position:relative;height:200px;"><canvas id="prC"></canvas></div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- MODAL -->
+<div class="modal-ov" id="modal" style="display:none;" onclick="if(event.target===this)closeModal()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-hd"><div class="modal-t" id="m-title">New Observation</div><button class="xbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-bd">
+      <div class="frow">
+        <div class="fg" style="margin:0;"><label class="flb">Category</label><select class="fse" id="f-cat"><option>Unsafe Act</option><option>Near Miss</option><option>PPE Violation</option><option>Environmental</option><option>Fire Safety</option><option>Positive</option></select></div>
+        <div class="fg" style="margin:0;"><label class="flb">Priority</label><select class="fse" id="f-pri"><option>High</option><option>Medium</option><option>Low</option></select></div>
+      </div>
+      <div style="height:10px;"></div>
+      <div class="frow">
+        <div class="fg" style="margin:0;"><label class="flb">Location</label><input class="fin" id="f-loc" placeholder="e.g. Floor 3 East"></div>
+        <div class="fg" style="margin:0;"><label class="flb">Reported by</label><input class="fin" id="f-rep" placeholder="Inspector name"></div>
+      </div>
+      <div style="height:10px;"></div>
+      <div class="fg"><label class="flb">Description *</label><textarea class="fta" id="f-des" placeholder="Describe the observation in detail..."></textarea></div>
+      <div class="fg"><label class="flb">Corrective action required</label><textarea class="fta" id="f-act" placeholder="What action must be taken?"></textarea></div>
+      <div class="frow">
+        <div class="fg" style="margin:0;"><label class="flb">Create date</label><input type="date" class="fin" id="f-crd"></div>
+        <div class="fg" style="margin:0;"><label class="flb">Due date *</label><input type="date" class="fin" id="f-dud"></div>
+      </div>
+      <div style="height:10px;"></div>
+      <div class="frow">
+        <div class="fg" style="margin:0;"><label class="flb">Close date</label><input type="date" class="fin" id="f-cld"></div>
+        <div class="fg" style="margin:0;"><label class="flb">Status</label><select class="fse" id="f-sts"><option>Open</option><option>In Progress</option><option>Closed</option></select></div>
+      </div>
+      <div style="height:10px;"></div>
+      <div class="fg">
+        <label class="flb">Photos</label>
+        <label class="phu" style="display:block;">
+          <input type="file" id="f-pho" accept="image/*" multiple onchange="handlePho(this)" style="display:none;">
+          <div style="font-size:22px;margin-bottom:6px;">📷</div>
+          <div style="font-size:13px;color:var(--mu);">Click to upload observation photos</div>
+        </label>
+        <div class="pp" id="pp"></div>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-p" id="sv-btn" onclick="saveObs()">Save Observation</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+// ─── CONFIG ───────────────────────────────────────────────
+let API_URL = localStorage.getItem('hse_api_url') || '';
+
+// Sample data shown when no Google Sheets connected
+const SAMPLE = [
+  {id:'OBS-001',category:'Unsafe Act',description:'Worker operating scaffold without harness on level 12',location:'Floor 12 – North scaffold',reporter:'Ahmed Al-Rashid',priority:'High',status:'Open',createDate:'2026-03-01',dueDate:'2026-03-08',closeDate:'',action:'Immediate harness provision and toolbox talk required',photos:[],timeline:['Raised by Ahmed Al-Rashid','Notified site supervisor']},
+  {id:'OBS-002',category:'PPE Violation',description:'Subcontractor crew missing safety goggles during cutting operations',location:'B2 Basement – Mechanical room',reporter:'Sara Al-Mutairi',priority:'Medium',status:'Closed',createDate:'2026-03-03',dueDate:'2026-03-10',closeDate:'2026-03-09',action:'PPE distributed and compliance check conducted',photos:[],timeline:['Raised by Sara Al-Mutairi','PPE issued','Closed']},
+  {id:'OBS-003',category:'Near Miss',description:'Falling rebar from floor 8 – near miss of ground crew',location:'Floor 8 – East façade',reporter:'Khalid Bin Saleh',priority:'High',status:'In Progress',createDate:'2026-03-05',dueDate:'2026-04-05',closeDate:'',action:'Exclusion zone and toe boards required immediately',photos:[],timeline:['Raised by Khalid Bin Saleh','Investigation team assigned']},
+  {id:'OBS-004',category:'Environmental',description:'Concrete washout water near storm drain without containment',location:'Site entrance – south gate',reporter:'Mohammed Al-Harbi',priority:'Medium',status:'Closed',createDate:'2026-03-10',dueDate:'2026-03-15',closeDate:'2026-03-14',action:'Bunded containment installed',photos:[],timeline:['Raised','Containment installed','Closed']},
+  {id:'OBS-005',category:'Fire Safety',description:'Flammable materials stored adjacent to hot work area',location:'Floor 4 – Welding zone',reporter:'Ahmed Al-Rashid',priority:'High',status:'Open',createDate:'2026-03-15',dueDate:'2026-03-17',closeDate:'',action:'Relocate storage and obtain hot work permit',photos:[],timeline:['Raised by Ahmed Al-Rashid']},
+  {id:'OBS-006',category:'Positive',description:'Excellent housekeeping at concrete pouring crew – zero waste on deck',location:'Floor 6 – West deck',reporter:'Sara Al-Mutairi',priority:'Low',status:'Closed',createDate:'2026-03-18',dueDate:'2026-03-25',closeDate:'2026-03-18',action:'Commendation issued to crew',photos:[],timeline:['Raised','Commendation issued']},
+  {id:'OBS-007',category:'Unsafe Act',description:'Crane signal man not maintaining visual contact during lift',location:'Tower crane – Level 5',reporter:'Khalid Bin Saleh',priority:'High',status:'Open',createDate:'2026-03-20',dueDate:'2026-03-22',closeDate:'',action:'Stop work – re-brief signalman',photos:[],timeline:['Raised','Crane suspended']},
+  {id:'OBS-008',category:'PPE Violation',description:'3 workers on roof without hard hats – visiting subcontractor',location:'Roof level – plant room',reporter:'Mohammed Al-Harbi',priority:'Medium',status:'In Progress',createDate:'2026-03-22',dueDate:'2026-04-01',closeDate:'',action:'Issue PPE at gate, update induction',photos:[],timeline:['Raised','Subcontractor notified']},
+];
+
+const MN=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const CC={'Unsafe Act':'#E24B4A','Near Miss':'#BA7517','PPE Violation':'#185FA5','Environmental':'#1D9E75','Fire Safety':'#9B1C1C','Positive':'#3B6D11'};
+const CX={'Unsafe Act':'cu','Near Miss':'cn','PPE Violation':'cp','Environmental':'ce','Fire Safety':'cf','Positive':'cpos'};
+let obs=[],editId=null,photos=[],charts={};
+
+// ─── INIT ─────────────────────────────────────────────────
+function init(){
+  if(API_URL){
+    document.getElementById('config-bar').style.display='none';
+    document.getElementById('api-input').value=API_URL;
+    document.getElementById('slbl').textContent='Connected';
+    loadData();
+  } else {
+    obs=[...SAMPLE];
+    renderAll();
+    document.getElementById('d-load').style.display='none';
+    document.getElementById('d-content').style.display='block';
+  }
+}
+
+function saveApiUrl(){
+  const url=document.getElementById('api-input').value.trim();
+  if(!url.startsWith('https://script.google.com')){alert('Please paste a valid Apps Script URL (starts with https://script.google.com/macros/s/...)');return;}
+  API_URL=url;
+  localStorage.setItem('hse_api_url',url);
+  document.getElementById('config-bar').style.display='none';
+  document.getElementById('slbl').textContent='Connected';
+  toast('Connected to Google Sheets!');
+  loadData();
+}
+
+function dismissConfig(){
+  document.getElementById('config-bar').style.display='none';
+  obs=[...SAMPLE];
+  renderAll();
+  document.getElementById('d-load').style.display='none';
+  document.getElementById('d-content').style.display='block';
+}
+
+// ─── API ──────────────────────────────────────────────────
+function td(){return new Date().toISOString().slice(0,10);}
+function fmt(d){if(!d)return'—';const p=d.toString().slice(0,10).split('-');return p[2]+' '+MN[+p[1]-1]+' '+p[0];}
+function cs(o){if(o.status==='Closed')return'Closed';if(o.dueDate&&o.dueDate<td())return'Overdue';return o.status||'Open';}
+function toast(m,t='s'){const el=document.createElement('div');el.className='toast '+t;el.textContent=m;document.body.appendChild(el);setTimeout(()=>el.remove(),3000);}
+function sync(loading){document.getElementById('sdot').style.background=loading?'#BA7517':'#1D9E75';document.getElementById('slbl').textContent=loading?'Syncing...':'Connected';}
+
+async function callApi(action,data={}){
+  if(!API_URL) return null;
+  sync(true);
+  try{
+    let res;
+    if(action==='getAll') res=await fetch(API_URL+'?action=getAll');
+    else res=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...data})});
+    const json=await res.json();
+    sync(false);return json;
+  }catch(e){sync(false);toast('Connection error — working offline','e');return null;}
+}
+
+async function loadData(){
+  document.getElementById('d-load').style.display='flex';
+  document.getElementById('d-content').style.display='none';
+  const r=await callApi('getAll');
+  if(r && r.observations) obs=r.observations;
+  else if(!API_URL) obs=[...SAMPLE];
+  document.getElementById('d-load').style.display='none';
+  document.getElementById('d-content').style.display='block';
+  renderAll();
+}
+
+// ─── RENDER ───────────────────────────────────────────────
+function renderAll(){
+  const t=document.querySelector('.nav-tab.active').textContent.toLowerCase();
+  if(t.includes('dash'))renderDash();
+  else if(t.includes('obs'))renderObs();
+  else renderAna();
+}
+
+function switchTab(tab){
+  document.querySelectorAll('.sec').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  document.querySelectorAll('.nav-tab').forEach(t=>{if(t.textContent.toLowerCase().startsWith(tab.slice(0,4)))t.classList.add('active');});
+  if(tab==='dashboard')renderDash();
+  else if(tab==='observations')renderObs();
+  else renderAna();
+}
+
+function dc(id){if(charts[id]){charts[id].destroy();delete charts[id];}}
+
+function renderDash(){
+  const tot=obs.length,cl=obs.filter(o=>o.status==='Closed').length;
+  const op=obs.filter(o=>cs(o)==='Open').length,od=obs.filter(o=>cs(o)==='Overdue').length,hi=obs.filter(o=>o.priority==='High').length;
+  document.getElementById('kpi').innerHTML=
+    '<div class="kpi info"><div class="kpi-lb">Total</div><div class="kpi-val">'+tot+'</div></div>'+
+    '<div class="kpi danger"><div class="kpi-lb">Open</div><div class="kpi-val" style="color:var(--re);">'+op+'</div></div>'+
+    '<div class="kpi success"><div class="kpi-lb">Closed</div><div class="kpi-val" style="color:var(--gr);">'+cl+'</div></div>'+
+    '<div class="kpi warning"><div class="kpi-lb">Overdue</div><div class="kpi-val" style="color:var(--am);">'+od+'</div></div>'+
+    '<div class="kpi danger"><div class="kpi-lb">High priority</div><div class="kpi-val" style="color:var(--re);">'+hi+'</div></div>';
+  const catC={};obs.forEach(o=>{catC[o.category]=(catC[o.category]||0)+1;});
+  dc('catC');
+  if(Object.keys(catC).length){
+    charts['catC']=new Chart(document.getElementById('catC'),{type:'doughnut',data:{labels:Object.keys(catC),datasets:[{data:Object.values(catC),backgroundColor:Object.keys(catC).map(c=>CC[c]||'#888'),borderWidth:0}]},options:{plugins:{legend:{position:'right',labels:{font:{size:10},boxWidth:10}}},responsive:true,maintainAspectRatio:false}});
+  }
+  const mth=Array(12).fill(0);obs.forEach(o=>{const m=new Date(o.createDate).getMonth();if(!isNaN(m))mth[m]++;});
+  dc('trendC');
+  charts['trendC']=new Chart(document.getElementById('trendC'),{type:'line',data:{labels:MN,datasets:[{label:'Obs',data:mth,borderColor:'#E8641A',backgroundColor:'rgba(232,100,26,0.08)',fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#E8641A'}]},options:{plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{font:{size:10}}},y:{beginAtZero:true,ticks:{stepSize:1,font:{size:10}}}},responsive:true,maintainAspectRatio:false}});
+  const rec=[...obs].sort((a,b)=>b.createDate.localeCompare(a.createDate)).slice(0,5);
+  document.getElementById('d-tbody').innerHTML=rec.map(o=>{const s=cs(o);
+    return '<tr onclick="openEdit(\''+o.id+'\')"><td class="obs-id">'+o.id+'</td><td><span class="badge '+CX[o.category]+'">'+o.category+'</span></td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+o.description+'</td><td><span class="pdot '+(o.priority==='High'?'ph':o.priority==='Medium'?'pm':'pl')+'"></span>'+o.priority+'</td><td><span class="badge '+s.toLowerCase().replace(' ','')+'">'+s+'</span></td><td style="font-family:monospace;font-size:11px;">'+fmt(o.dueDate)+'</td></tr>';
+  }).join('')||'<tr><td colspan="6" style="text-align:center;color:var(--mu);padding:32px;">No observations yet. Add your first one!</td></tr>';
+}
+
+function renderObs(){
+  const srch=(document.getElementById('srch').value||'').toLowerCase();
+  const fst=document.getElementById('fst').value,fct=document.getElementById('fct').value;
+  const fil=obs.filter(o=>{
+    const s=cs(o);
+    if(fst&&s!==fst)return false;
+    if(fct&&o.category!==fct)return false;
+    if(srch&&!o.description.toLowerCase().includes(srch)&&!o.id.toLowerCase().includes(srch)&&!(o.location||'').toLowerCase().includes(srch))return false;
+    return true;
+  });
+  document.getElementById('o-tbody').innerHTML=fil.map(o=>{const s=cs(o);
+    return '<tr onclick="openEdit(\''+o.id+'\')" style="'+(s==='Overdue'?'background:rgba(186,117,23,0.04);':'')+'">'+
+      '<td class="obs-id">'+o.id+'</td>'+
+      '<td style="font-family:monospace;font-size:11px;white-space:nowrap;">'+fmt(o.createDate)+'</td>'+
+      '<td><span class="badge '+CX[o.category]+'">'+o.category+'</span></td>'+
+      '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+o.description+'</td>'+
+      '<td><span class="pdot '+(o.priority==='High'?'ph':o.priority==='Medium'?'pm':'pl')+'"></span>'+o.priority+'</td>'+
+      '<td><span class="badge '+s.toLowerCase().replace(' ','')+'">'+s+'</span></td>'+
+      '<td style="font-family:monospace;font-size:11px;white-space:nowrap;">'+fmt(o.dueDate)+'</td>'+
+      '<td style="font-family:monospace;font-size:11px;white-space:nowrap;">'+fmt(o.closeDate)+'</td>'+
+      '<td onclick="event.stopPropagation()" style="white-space:nowrap;">'+
+        '<button class="btn btn-sm" onclick="openEdit(\''+o.id+'\')" style="margin-right:4px;">Edit</button>'+
+        '<button class="btn btn-sm" onclick="delObs(\''+o.id+'\')" style="color:var(--re);border-color:var(--re);">Del</button>'+
+      '</td></tr>';
+  }).join('')||'<tr><td colspan="9" style="text-align:center;color:var(--mu);padding:32px;">No observations found</td></tr>';
+}
+
+function renderAna(){
+  const tot=obs.length,cl=obs.filter(o=>o.status==='Closed');
+  document.getElementById('a-cl').textContent=tot?Math.round(cl.length/tot*100)+'%':'0%';
+  document.getElementById('a-od').textContent=tot?Math.round(obs.filter(o=>cs(o)==='Overdue').length/tot*100)+'%':'0%';
+  const avg=cl.length?Math.round(cl.reduce((s,o)=>{return s+(new Date(o.closeDate)-new Date(o.createDate))/864e5;},0)/cl.length):null;
+  document.getElementById('a-dy').textContent=avg!==null?avg+'d':'—';
+  const sC={Open:0,'In Progress':0,Closed:0,Overdue:0};obs.forEach(o=>{const s=cs(o);sC[s]=(sC[s]||0)+1;});
+  dc('stC');charts['stC']=new Chart(document.getElementById('stC'),{type:'bar',data:{labels:Object.keys(sC),datasets:[{data:Object.values(sC),backgroundColor:['#E24B4A','#185FA5','#1D9E75','#BA7517'],borderRadius:4,borderWidth:0}]},options:{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{stepSize:1}}},responsive:true,maintainAspectRatio:false}});
+  const pC={High:0,Medium:0,Low:0};obs.forEach(o=>pC[o.priority]=(pC[o.priority]||0)+1);
+  dc('prC');charts['prC']=new Chart(document.getElementById('prC'),{type:'bar',data:{labels:['High','Medium','Low'],datasets:[{data:[pC.High,pC.Medium,pC.Low],backgroundColor:['#E24B4A','#BA7517','#1D9E75'],borderRadius:4,borderWidth:0}]},options:{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{stepSize:1}}},responsive:true,maintainAspectRatio:false}});
+}
+
+// ─── EXPORT ───────────────────────────────────────────────
+function exportExcel(){
+  if(!obs.length){toast('No observations to export','e');return;}
+  const rows=obs.map(o=>({'ID':o.id,'Category':o.category,'Description':o.description,'Location':o.location||'','Reported By':o.reporter||'','Priority':o.priority,'Status':cs(o),'Create Date':o.createDate||'','Due Date':o.dueDate||'','Close Date':o.closeDate||'','Corrective Action':o.action||''}));
+  const ws=XLSX.utils.json_to_sheet(rows);
+  ws['!cols']=[{wch:10},{wch:16},{wch:50},{wch:22},{wch:20},{wch:10},{wch:12},{wch:13},{wch:13},{wch:13},{wch:40}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'HSE Observations');
+  const sum=XLSX.utils.aoa_to_sheet([
+    ['HSE Performance Summary',''],['Generated',new Date().toLocaleDateString()],['',''],
+    ['Total Observations',obs.length],['Open',obs.filter(o=>cs(o)==='Open').length],
+    ['In Progress',obs.filter(o=>cs(o)==='In Progress').length],['Closed',obs.filter(o=>o.status==='Closed').length],
+    ['Overdue',obs.filter(o=>cs(o)==='Overdue').length],['High Priority',obs.filter(o=>o.priority==='High').length],
+    ['',''],['Closure Rate',obs.length?Math.round(obs.filter(o=>o.status==='Closed').length/obs.length*100)+'%':'0%']
+  ]);
+  XLSX.utils.book_append_sheet(wb,sum,'Summary');
+  XLSX.writeFile(wb,'HSE-Observations-'+td()+'.xlsx');
+  toast('Excel file downloaded');
+}
+
+function exportCSV(){
+  if(!obs.length){toast('No observations to export','e');return;}
+  const headers=['ID','Category','Description','Location','Reported By','Priority','Status','Create Date','Due Date','Close Date','Corrective Action'];
+  const rows=obs.map(o=>[o.id,o.category,'"'+(o.description||'').replace(/"/g,'""')+'"',o.location||'',o.reporter||'',o.priority,cs(o),o.createDate||'',o.dueDate||'',o.closeDate||'','"'+(o.action||'').replace(/"/g,'""')+'"']);
+  const csv=[headers.join(','),...rows.map(r=>r.join(','))].join('\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='HSE-Observations-'+td()+'.csv';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  toast('CSV downloaded — import to Google Sheets: File → Import');
+}
+
+// ─── CRUD ─────────────────────────────────────────────────
+function nxtId(){const mx=obs.reduce((m,o)=>{const n=parseInt(o.id.replace('OBS-',''));return n>m?n:m;},0);return'OBS-'+String(mx+1).padStart(3,'0');}
+
+function openAdd(){
+  editId=null;photos=[];
+  document.getElementById('m-title').textContent='New HSE Observation';
+  document.getElementById('f-cat').value='Unsafe Act';
+  document.getElementById('f-pri').value='High';
+  document.getElementById('f-loc').value='';
+  document.getElementById('f-rep').value='';
+  document.getElementById('f-des').value='';
+  document.getElementById('f-act').value='';
+  document.getElementById('f-crd').value=td();
+  document.getElementById('f-dud').value='';
+  document.getElementById('f-cld').value='';
+  document.getElementById('f-sts').value='Open';
+  document.getElementById('pp').innerHTML='';
+  document.getElementById('modal').style.display='flex';
+}
+
+function openEdit(id){
+  const o=obs.find(x=>x.id===id);if(!o)return;
+  editId=id;photos=[...(o.photos||[])];
+  document.getElementById('m-title').textContent='Edit — '+id;
+  document.getElementById('f-cat').value=o.category||'Unsafe Act';
+  document.getElementById('f-pri').value=o.priority||'High';
+  document.getElementById('f-loc').value=o.location||'';
+  document.getElementById('f-rep').value=o.reporter||'';
+  document.getElementById('f-des').value=o.description||'';
+  document.getElementById('f-act').value=o.action||'';
+  document.getElementById('f-crd').value=o.createDate||'';
+  document.getElementById('f-dud').value=o.dueDate||'';
+  document.getElementById('f-cld').value=o.closeDate||'';
+  document.getElementById('f-sts').value=o.status||'Open';
+  document.getElementById('pp').innerHTML=photos.map(u=>'<img class="pth" src="'+u+'">').join('');
+  document.getElementById('modal').style.display='flex';
+}
+
+function closeModal(){document.getElementById('modal').style.display='none';}
+
+function handlePho(inp){
+  Array.from(inp.files).forEach(f=>{
+    const r=new FileReader();
+    r.onload=e=>{photos.push(e.target.result);document.getElementById('pp').innerHTML+=('<img class="pth" src="'+e.target.result+'">');};
+    r.readAsDataURL(f);
+  });
+}
+
+async function saveObs(){
+  const des=document.getElementById('f-des').value.trim();
+  const due=document.getElementById('f-dud').value;
+  if(!des){alert('Please enter a description.');return;}
+  if(!due){alert('Please enter a due date.');return;}
+  const btn=document.getElementById('sv-btn');btn.textContent='Saving...';btn.disabled=true;
+  const prev=editId?obs.find(o=>o.id===editId):{};
+  const o={
+    id:editId||nxtId(),category:document.getElementById('f-cat').value,
+    priority:document.getElementById('f-pri').value,location:document.getElementById('f-loc').value,
+    reporter:document.getElementById('f-rep').value,description:des,
+    action:document.getElementById('f-act').value,createDate:document.getElementById('f-crd').value,
+    dueDate:due,closeDate:document.getElementById('f-cld').value,
+    status:document.getElementById('f-sts').value,photos:photos,
+    timeline:[...(prev.timeline||[]),editId?'Updated '+td():'Raised '+td()]
+  };
+  if(API_URL){
+    try{
+      await callApi('save',{action:'save',observation:o});
+      toast(editId?'Updated in Google Sheets':'Saved to Google Sheets');
+      await loadData();
+    }catch(e){toast('Save failed','e');}
+  } else {
+    if(editId){const i=obs.findIndex(x=>x.id===editId);obs[i]=o;}
+    else obs.unshift(o);
+    toast(editId?'Updated (offline)':'Saved (offline — connect Google Sheets to persist)');
+    renderAll();
+  }
+  closeModal();
+  btn.textContent='Save Observation';btn.disabled=false;
+}
+
+async function delObs(id){
+  if(!confirm('Delete observation '+id+'?'))return;
+  if(API_URL){
+    try{await callApi('delete',{action:'delete',id});toast('Deleted');await loadData();}
+    catch(e){toast('Delete failed','e');}
+  } else {
+    obs=obs.filter(o=>o.id!==id);
+    toast('Deleted (offline)');renderAll();
+  }
+}
+
+init();
+</script>
+</body>
+</html>
