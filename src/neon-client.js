@@ -119,8 +119,20 @@ function _startPolling(col, callback, docId = null, ref = null) {
   };
   poll();
   const timer = setInterval(poll, 15000);
-  _listeners.set(key, { col, timer });
+  // Store the poll fn so refreshAllSnapshots() can force-refresh on demand
+  // (Refresh button, tab visibility change, window focus — kills the stale
+  // feel when a user returns to the Overview after working in another tab.)
+  _listeners.set(key, { col, timer, poll });
   return () => { clearInterval(timer); _listeners.delete(key); };
+}
+
+// Force every active onSnapshot listener to re-poll its source immediately.
+// Used by the UI Refresh button and by visibilitychange/focus listeners so
+// dashboards don't look stale while waiting for the 15-second tick.
+export function refreshAllSnapshots() {
+  const polls = [];
+  _listeners.forEach(l => { if (typeof l.poll === "function") polls.push(l.poll()); });
+  return Promise.allSettled(polls);
 }
 
 // ── neonDb — mirrors Firestore db object ─────────────────────────────────────

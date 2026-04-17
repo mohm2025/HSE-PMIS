@@ -4,7 +4,7 @@ import { AlertTriangle, Eye, FileWarning, TrendingUp, Activity, Plus, X, CheckCi
 // ── EmailJS (bundled locally — no runtime CDN dependency) ────────────────────
 import emailjs from "@emailjs/browser";
 // ── Neon REST API — replaces Firebase SDK ─────────────────────────────────────
-import { neonAuth as auth, neonDb as db, neonCompat } from "./neon-client";
+import { neonAuth as auth, neonDb as db, neonCompat, refreshAllSnapshots } from "./neon-client";
 const { collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc,
         setDoc, query, where,
         signInWithEmailAndPassword, signOut, updatePassword,
@@ -1749,7 +1749,39 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
     await saveSettings({manualStats:draft});
     setSaving(false);setEditStats(false);
   };
-  // ── Hero site cards — executive snapshot for each project ──────────────────
+
+  // ── Lag fix: manual Refresh + auto-refresh on tab visibility/focus ─────────
+  // Previously users reported the Overview felt stale when returning from
+  // another tab or after leaving it open. The 15-second polling tick could
+  // leave the numbers frozen for up to a full interval. Now:
+  //  • Clicking Refresh forces every listener to re-poll immediately.
+  //  • Returning to this tab (visibilitychange → visible) triggers the same.
+  //  • Window focus also triggers it (covers multi-window setups).
+  // A "Last refreshed" timestamp makes the freshness visible to the user.
+  const [lastRefreshed,setLastRefreshed]=useState(new Date());
+  const [refreshing,setRefreshing]=useState(false);
+  const doRefresh=useCallback(async()=>{
+    setRefreshing(true);
+    try{ await refreshAllSnapshots(); }
+    catch(e){ console.warn("[Overview] refresh failed:",e); }
+    setLastRefreshed(new Date());
+    // Keep the spin visible at least 600ms so the click feels responsive
+    setTimeout(()=>setRefreshing(false),600);
+  },[]);
+  useEffect(()=>{
+    const onVis=()=>{ if(document.visibilityState==="visible") doRefresh(); };
+    const onFocus=()=>doRefresh();
+    document.addEventListener("visibilitychange",onVis);
+    window.addEventListener("focus",onFocus);
+    return()=>{
+      document.removeEventListener("visibilitychange",onVis);
+      window.removeEventListener("focus",onFocus);
+    };
+  },[doRefresh]);
+  // ── Hero site cards — Option B: 8 metrics per site, one unified view ──────
+  // This replaces the previous "3-metric hero + duplicated Per-Project
+  // Breakdown" layout. Each site now owns all of its key numbers in one
+  // place — no more hunting across two sections that showed the same data.
   const siteHeroes = [
     {id:"Site 1", navId:"site1", label:"Palm1 Al-Ahsa Project",      short:"Palm1", accent:C.teal,   grad:"linear-gradient(135deg,#0f4c3a,#065f46)"},
     {id:"Site 2", navId:"site2", label:"Palm2 Al-Madinah Project",   short:"Palm2", accent:C.purple, grad:"linear-gradient(135deg,#4c1d95,#5b21b6)"},
@@ -1759,8 +1791,15 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
     const sNcr = (ncr||[]).filter(n => n.site === s.id);
     const sMp  = (manpower||[]).filter(m => m.site === s.id);
     const sInc = (incidents||[]).filter(i => i.site === s.id);
+    // Per-site Days-LTI override (if present in manualStats), else global value
+    const siteDaysLTI = manualStats?.perSite?.[s.id]?.daysLTI
+                      ?? (computedDaysLTI ?? manualStats?.daysLTI ?? 0);
+    const siteMHWeek  = manualStats?.perSite?.[s.id]?.manhoursWeek
+                      ?? manualStats?.manhoursWeek
+                      ?? 0;
     return {
       ...s,
+      daysLTI:     siteDaysLTI,
       openObs:     sObs.filter(o=>o.status==="Open").length,
       criticalNcr: sNcr.filter(n=>n.severity==="Critical").length,
       nearMiss:    sObs.filter(o=>o.type==="Near Miss").length,
@@ -1768,6 +1807,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
       totalNcr:    sNcr.length,
       mp:          sMp.length,
       inc:         sInc.length,
+      mhWeek:      siteMHWeek,
     };
   });
   // ── Comparison chart data: observations / NCR / near-miss per site ─────────
@@ -1781,55 +1821,72 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
   }));
   return(
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
-      {/* ══ Welcome banner + admin edit button ═════════════════════════════ */}
+      {/* ══ Welcome banner + Refresh + admin edit button ═════════════════════ */}
       <div style={{background:"linear-gradient(135deg,#0d9488 0%,#6366f1 100%)",borderRadius:14,padding:"20px 24px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
         <div>
           <div style={{color:"#fff",fontWeight:900,fontSize:22,letterSpacing:0.3}}>HSSE Command Center</div>
-          <div style={{color:"rgba(255,255,255,0.8)",fontSize:12,marginTop:4}}>Executive overview · {siteHeroes.length} active projects · {new Date().toLocaleDateString(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"})}</div>
-        </div>
-        {userRole==="admin" && (
-          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <SavingBadge saving={saving} C={C}/>
-            {editStats
-              ? <><Btn onClick={save} color={C.green}><Save size={14}/>Save Stats</Btn>
-                   <Btn onClick={()=>{setDraft(manualStats);setEditStats(false);}} color={C.muted} style={{background:C.border}}>Cancel</Btn></>
-              : <Btn onClick={()=>setEditStats(true)} color={C.blue} style={{background:"rgba(255,255,255,0.18)",color:"#fff",border:"1px solid rgba(255,255,255,0.3)"}}><Edit2 size={14}/>Edit Global Stats</Btn>}
+          <div style={{color:"rgba(255,255,255,0.8)",fontSize:12,marginTop:4}}>
+            Executive overview · {siteHeroes.length} active projects · {new Date().toLocaleDateString(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"})}
           </div>
-        )}
+          <div style={{color:"rgba(255,255,255,0.65)",fontSize:11,marginTop:4,fontStyle:"italic"}}>
+            Last refreshed: {lastRefreshed.toLocaleTimeString()}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <button
+            onClick={doRefresh}
+            disabled={refreshing}
+            title="Force-refresh all site data"
+            style={{background:"rgba(255,255,255,0.18)",color:"#fff",border:"1px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:12,cursor:refreshing?"wait":"pointer",display:"flex",alignItems:"center",gap:6,opacity:refreshing?0.75:1}}>
+            <span style={{display:"inline-block",transition:"transform .9s ease",transform:refreshing?"rotate(360deg)":"none"}}>⟳</span>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+          {userRole==="admin" && (
+            <>
+              <SavingBadge saving={saving} C={C}/>
+              {editStats
+                ? <><Btn onClick={save} color={C.green}><Save size={14}/>Save Stats</Btn>
+                     <Btn onClick={()=>{setDraft(manualStats);setEditStats(false);}} color={C.muted} style={{background:C.border}}>Cancel</Btn></>
+                : <Btn onClick={()=>setEditStats(true)} color={C.blue} style={{background:"rgba(255,255,255,0.18)",color:"#fff",border:"1px solid rgba(255,255,255,0.3)"}}><Edit2 size={14}/>Edit Global Stats</Btn>}
+            </>
+          )}
+        </div>
       </div>
 
-      {/* ══ Three site hero cards — click to open that site's page ═════════ */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:14}}>
+      {/* ══ Three site hero cards (Option B) — 8 metrics each, click to open ═ */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:16}}>
         {siteHeroes.map(s => (
           <div key={s.id}
             onClick={()=>setActive&&setActive(s.navId)}
             role="button"
             tabIndex={0}
             onKeyDown={(e)=>{if(e.key==="Enter"||e.key===" ")setActive&&setActive(s.navId);}}
-            style={{background:s.grad,borderRadius:14,padding:20,cursor:"pointer",border:`1px solid ${s.accent}55`,boxShadow:"0 4px 16px rgba(0,0,0,0.25)",transition:"transform .15s, box-shadow .15s",display:"flex",flexDirection:"column",gap:12}}
+            style={{background:s.grad,borderRadius:16,padding:22,cursor:"pointer",border:`1px solid ${s.accent}55`,boxShadow:"0 4px 16px rgba(0,0,0,0.25)",transition:"transform .15s, box-shadow .15s",display:"flex",flexDirection:"column",gap:14}}
             onMouseEnter={(e)=>{e.currentTarget.style.transform="translateY(-3px)";e.currentTarget.style.boxShadow="0 10px 28px rgba(0,0,0,0.4)";}}
             onMouseLeave={(e)=>{e.currentTarget.style.transform="none";e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.25)";}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
               <div>
-                <div style={{color:"#fff",fontWeight:900,fontSize:17,lineHeight:1.2}}>{s.label}</div>
+                <div style={{color:"#fff",fontWeight:900,fontSize:18,lineHeight:1.2}}>{s.label}</div>
                 <div style={{color:"rgba(255,255,255,0.65)",fontSize:11,marginTop:3,letterSpacing:0.4,textTransform:"uppercase"}}>{s.id}</div>
               </div>
               <div style={{background:"rgba(255,255,255,0.18)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:99,padding:"4px 10px",color:"#fff",fontSize:11,fontWeight:700,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap"}}>
                 View Site →
               </div>
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
               {[
+                ["Days LTI",     s.daysLTI,     "#bbf7d0"],
                 ["Open Obs",     s.openObs,     "#fca5a5"],
-                ["Critical NCR", s.criticalNcr, "#fecaca"],
+                ["Crit NCR",     s.criticalNcr, "#fecaca"],
                 ["Near Miss",    s.nearMiss,    "#fde68a"],
                 ["Total Obs",    s.totalObs,    "#a7f3d0"],
                 ["Manpower",     s.mp,          "#c4b5fd"],
                 ["Incidents",    s.inc,         "#fed7aa"],
+                ["MH Week",      (s.mhWeek||0).toLocaleString(), "#bae6fd"],
               ].map(([l,v,c]) => (
-                <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:8,padding:"8px 10px",textAlign:"center"}}>
-                  <div style={{color:c,fontWeight:900,fontSize:18,lineHeight:1}}>{v}</div>
-                  <div style={{color:"rgba(255,255,255,0.7)",fontSize:9,marginTop:3,textTransform:"uppercase",letterSpacing:0.4}}>{l}</div>
+                <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:8,padding:"10px 8px",textAlign:"center",minHeight:58,display:"flex",flexDirection:"column",justifyContent:"center"}}>
+                  <div style={{color:c,fontWeight:900,fontSize:19,lineHeight:1}}>{v}</div>
+                  <div style={{color:"rgba(255,255,255,0.72)",fontSize:9,marginTop:4,textTransform:"uppercase",letterSpacing:0.4}}>{l}</div>
                 </div>
               ))}
             </div>
@@ -1866,66 +1923,16 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
           </div>
         </div>
       )}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-        <StatBox label="Days Without LTI"   value={computedDaysLTI??manualStats.daysLTI??0}     color={C.green}  icon={CheckCircle2} sub={computedDaysLTI!==null?"Auto-computed":"Manual"} C={C}/>
-        <StatBox label="Open Observations"  value={obs.filter(o=>o.status==="Open").length}         color={C.orange} icon={Eye}          sub="Live from data" C={C}/>
-        <StatBox label="Critical NCRs"      value={ncr.filter(n=>n.severity==="Critical").length}   color={C.red}    icon={AlertOctagon}  sub="Live from data" C={C}/>
-        <StatBox label="Active Permits"     value={ptw.filter(p=>p.status==="Active").length}       color={C.blue}   icon={ClipboardList} sub="Live from data" C={C}/>
-        <StatBox label="Expired Training"   value={training.filter(t=>t.status==="Expired").length} color={C.red}    icon={BookOpen}      sub="Needs renewal"  C={C}/>
-        <StatBox label="Near Misses"        value={obs.filter(o=>o.type==="Near Miss").length}      color={C.yellow} icon={AlertTriangle} sub="Live from data" C={C}/>
-        <StatBox label="Total Observations" value={obs.length}                                      color={C.teal}   icon={Eye}           sub="All time"       C={C}/>
-        <StatBox label="NCRs Overdue"       value={ncr.filter(n=>n.status==="Overdue").length}      color={C.orange} icon={FileWarning}   sub="Live from data" C={C}/>
-      </div>
-      {/* ══ Per-project breakdown — each site shown separately ═══════════════════ */}
-      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
-        <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>🏗 Per-Project Breakdown</h3>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
-          {[
-            {id:"Site 1", label:"Palm1 Al-Ahsa",    accent:C.teal},
-            {id:"Site 2", label:"Palm2 Al-Madinah", accent:C.purple},
-            {id:"Site 3", label:"Site 3",           accent:C.orange},
-          ].map(s => {
-            const sObs = (obs||[]).filter(o => o.site === s.id);
-            const sNcr = (ncr||[]).filter(n => n.site === s.id);
-            const sInc = (incidents||[]).filter(i => i.site === s.id);
-            const sMp  = (manpower||[]).filter(m => m.site === s.id);
-            const sEq  = (equipment||[]).filter(e => e.site === s.id);
-            const isEmpty = sObs.length===0 && sNcr.length===0 && sInc.length===0 && sMp.length===0 && sEq.length===0;
-            const cells = [
-              ["Open Obs",     sObs.filter(o=>o.status==="Open").length,      C.orange],
-              ["Critical NCR", sNcr.filter(n=>n.severity==="Critical").length, C.red],
-              ["Near Miss",    sObs.filter(o=>o.type==="Near Miss").length,   C.yellow],
-              ["Total Obs",    sObs.length,                                    C.teal],
-              ["Manpower",     sMp.length,                                     C.purple],
-              ["Equipment",    sEq.length,                                     C.blue],
-              ["Incidents",    sInc.length,                                    C.red],
-              ["NCR Total",    sNcr.length,                                    C.indigo],
-            ];
-            return (
-              <div key={s.id} style={{background:s.accent+"0d",border:`1px solid ${s.accent}44`,borderRadius:12,padding:14}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                  <div style={{width:10,height:10,borderRadius:99,background:s.accent}}/>
-                  <div style={{color:C.text,fontWeight:700,fontSize:13}}>{s.label}</div>
-                  <div style={{color:C.muted,fontSize:10,marginLeft:"auto"}}>{s.id}</div>
-                </div>
-                {isEmpty ? (
-                  <div style={{color:C.muted,fontSize:11,fontStyle:"italic",padding:"14px 4px",textAlign:"center"}}>
-                    No data yet for this project
-                  </div>
-                ) : (
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
-                    {cells.map(([l,v,c]) => (
-                      <div key={l} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                        <span style={{color:C.sub,fontSize:11}}>{l}</span>
-                        <span style={{color:c,fontWeight:800,fontSize:14}}>{v}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+      {/* NOTE: Option B layout removes the global StatBox strip and the
+            "Per-Project Breakdown" block that previously duplicated what
+            the three site hero cards above already show. The two extra
+            portfolio-level tiles (Active Permits, Expired Training) that
+            are NOT part of the per-site cards live together below so no
+            unique information is lost. */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12}}>
+        <StatBox label="Active Permits"   value={ptw.filter(p=>p.status==="Active").length}       color={C.blue} icon={ClipboardList} sub="Portfolio-wide"    C={C}/>
+        <StatBox label="Expired Training" value={training.filter(t=>t.status==="Expired").length} color={C.red}  icon={BookOpen}      sub="Needs renewal"     C={C}/>
+        <StatBox label="NCRs Overdue"     value={ncr.filter(n=>n.status==="Overdue").length}      color={C.orange} icon={FileWarning} sub="Portfolio-wide"    C={C}/>
       </div>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
         <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>📋 Project Statistics</h3>
