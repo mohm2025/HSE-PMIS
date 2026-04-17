@@ -4422,11 +4422,34 @@ const DropdownSettings = ({
   // Save a single list to Firestore
   const save=async(key,list)=>{await saveSettings({[key]:list});};
 
+  // Bulk-aware list editor.
+  //  • Type one item and press Enter → adds that item.
+  //  • Paste multi-line text (one item per line) and press Enter or click Add
+  //    → parses every line, trims whitespace, skips blanks, removes
+  //      case-insensitive duplicates (against existing items AND within the
+  //      pasted set), then merges and sorts alphabetically A–Z.
+  //  • Shift+Enter inserts a newline so you can keep typing more items.
   const ListEditor=({title,color,items,setItems,firestoreKey,valKey,placeholder})=>{
+    // Normalise + dedupe + sort a candidate list, preserving the first-seen
+    // casing for any pair that collides only in case.
+    const mergeAndSort=(existing, incoming)=>{
+      const seen=new Map(); // lowercased → original casing
+      [...existing, ...incoming].forEach(raw=>{
+        const s=String(raw||"").trim();
+        if(!s) return;
+        const key=s.toLowerCase();
+        if(!seen.has(key)) seen.set(key, s);
+      });
+      return Array.from(seen.values()).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:"base"}));
+    };
+
     const add=()=>{
-      const val=v(valKey).trim();
-      if(!val||items.includes(val))return;
-      const updated=[...items,val];
+      const raw=v(valKey);
+      if(!raw||!raw.trim()) return;
+      // Split on newlines, commas, or semicolons so common paste styles Just Work.
+      const parts=raw.split(/[\r\n,;]+/);
+      const updated=mergeAndSort(items, parts);
+      if(updated.length===items.length) { sv(valKey,""); return; } // nothing new
       setItems(updated);
       save(firestoreKey,updated);
       sv(valKey,"");
@@ -4436,15 +4459,46 @@ const DropdownSettings = ({
       setItems(updated);
       save(firestoreKey,updated);
     };
+    const sortNow=()=>{
+      const updated=mergeAndSort(items, []);
+      if(JSON.stringify(updated)===JSON.stringify(items)) return;
+      setItems(updated);
+      save(firestoreKey,updated);
+    };
+
+    // Detect whether the current input is a multi-line paste so we can show
+    // a "N items to add" preview in the button.
+    const rawVal=v(valKey)||"";
+    const pendingCount=rawVal.trim()
+      ? rawVal.split(/[\r\n,;]+/).map(s=>s.trim()).filter(Boolean).length
+      : 0;
+
     return(
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
-        <div style={{color:C.text,fontWeight:700,fontSize:13,marginBottom:12}}>{title}</div>
-        <div style={{display:"flex",gap:8,marginBottom:10}}>
-          <input value={v(valKey)} onChange={e=>sv(valKey,e.target.value)}
-            onKeyDown={e=>e.key==="Enter"&&add()}
-            placeholder={placeholder||"Add new item..."}
-            style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none"}}/>
-          <Btn onClick={add} color={color} disabled={!v(valKey).trim()}><Plus size={13}/>Add</Btn>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8,flexWrap:"wrap"}}>
+          <div style={{color:C.text,fontWeight:700,fontSize:13}}>{title}</div>
+          {items.length>1&&(
+            <button onClick={sortNow} title="Re-sort alphabetically A–Z"
+              style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",color:C.muted,fontSize:10,cursor:"pointer"}}>
+              ↕ Sort A–Z
+            </button>
+          )}
+        </div>
+        <div style={{display:"flex",gap:8,marginBottom:6,alignItems:"flex-start"}}>
+          <textarea value={rawVal}
+            onChange={e=>sv(valKey,e.target.value)}
+            onKeyDown={e=>{
+              if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); add(); }
+            }}
+            rows={2}
+            placeholder={placeholder||"Add one item, or paste a list (one item per line)…"}
+            style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none",fontFamily:"inherit",resize:"vertical",minHeight:36}}/>
+          <Btn onClick={add} color={color} disabled={pendingCount===0}>
+            <Plus size={13}/>{pendingCount>1?`Add ${pendingCount}`:"Add"}
+          </Btn>
+        </div>
+        <div style={{color:C.muted,fontSize:10,marginBottom:10,lineHeight:1.5}}>
+          Enter = add · Shift+Enter = new line · Paste multiple lines to bulk-add. Duplicates &amp; blanks are skipped; list stays sorted A–Z.
         </div>
         <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
           {items.map(item=>(
