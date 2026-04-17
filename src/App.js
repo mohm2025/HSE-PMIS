@@ -85,6 +85,35 @@ const INIT_MANUAL_STATS = {daysLTI:142,manpower:518,manhoursWeek:31140,manhoursM
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const KPI_COLORS_PALETTE = ["#14b8a6","#ef4444","#f97316","#3b82f6","#6366f1","#a855f7","#ec4899","#eab308","#22c55e","#64748b","#06b6d4","#f43f5e","#84cc16","#fb923c","#818cf8"];
 
+// ── MANUAL-STAT FIELD DEFINITIONS ────────────────────────────────────────────
+// The "Edit Stats" form in Overview and each SiteDashboard used to duplicate
+// this list; same for the "Project Statistics" read-only tile grid. Now both
+// components share these definitions. Keep `key` in sync with INIT_MANUAL_STATS.
+// The tile/label color is read via C[colorKey] at render time so themes work.
+const MANUAL_STAT_FIELDS = [
+  {key:"daysLTI",         label:"Days Without LTI"},
+  {key:"manpower",        label:"Manpower"},
+  {key:"manhoursWeek",    label:"Man-hours (Week)"},
+  {key:"manhoursMonth",   label:"Man-hours (Month)"},
+  {key:"manhoursYear",    label:"Man-hours (Year)"},
+  {key:"manhoursProject", label:"Man-hours (Project)"},
+  {key:"safetyOfficers",  label:"Safety Officers"},
+  {key:"firstAiders",     label:"First Aiders"},
+  {key:"tbtAttendees",    label:"TBT Attendees"},
+];
+// Project Statistics tile config — `format` says whether to .toLocaleString()
+// the value (for counts with thousands separators) or leave it plain.
+const PROJECT_STAT_TILES = [
+  {key:"manpower",        label:"👷 Manpower",             colorKey:"purple", format:"n"},
+  {key:"manhoursWeek",    label:"⏱ Man-hours (Week)",      colorKey:"teal",   format:"n"},
+  {key:"manhoursMonth",   label:"📅 Man-hours (Month)",    colorKey:"blue",   format:"n"},
+  {key:"manhoursYear",    label:"📆 Man-hours (Year)",     colorKey:"indigo", format:"n"},
+  {key:"manhoursProject", label:"🏗 Man-hours (Project)",  colorKey:"green",  format:"n"},
+  {key:"safetyOfficers",  label:"👮 Safety Officers",      colorKey:"blue",   format:"raw"},
+  {key:"firstAiders",     label:"🏥 First Aiders",         colorKey:"orange", format:"raw"},
+  {key:"tbtAttendees",    label:"📢 TBT Attendees",        colorKey:"teal",   format:"n"},
+];
+
 // ── STATIC DEFAULTS (used only if Firestore has no saved data) ────────────────
 const DEFAULT_KPI_DATA = [
   {label:"TRIR",value:0.42,target:0.5,unit:"",trend:-8,good:"low"},
@@ -403,6 +432,100 @@ const SavingBadge = ({saving,C}) => saving?(
   </span>
 ):null;
 
+// ── SHARED PRIMITIVES — replace inlined style blocks across the app ──────────
+// Card: standard card wrapper used by almost every panel. `accent` tints the
+// border (e.g. edit panels use C.blue+"44"); `pad` overrides default padding.
+const Card = ({C,accent,pad=18,style={},children,...p}) => (
+  <div {...p} style={{background:C.card,border:`1px solid ${accent||C.border}`,borderRadius:14,padding:pad,...style}}>
+    {children}
+  </div>
+);
+// SectionTitle: the standard <h3> used at the top of every panel.
+const SectionTitle = ({C,children,style={}}) => (
+  <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14,...style}}>{children}</h3>
+);
+// Shared Recharts tooltip style — matches the card look in every chart.
+const chartTooltip = (C) => ({background:C.card,border:`1px solid ${C.border}`,borderRadius:8});
+// StatPill: the small colored tile used by NCR counts, Observation counts,
+// Alert summary strips. The "22" alpha on bg + "44" on border is the standard.
+const StatPill = ({label,value,color,C}) => (
+  <div style={{background:color+"22",border:`1px solid ${color}44`,borderRadius:10,padding:14,textAlign:"center"}}>
+    <div style={{color,fontSize:22,fontWeight:900}}>{value}</div>
+    <div style={{color:C.sub,fontSize:11}}>{label}</div>
+  </div>
+);
+// PillGrid: the auto-fit grid wrapper around StatPills (lets callers skip the
+// wrapping <div style={{display:"grid",...}}/>).
+const PillGrid = ({minWidth=130,gap=10,children}) => (
+  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fit,minmax(${minWidth}px,1fr))`,gap}}>{children}</div>
+);
+
+// ── ManualStatsEditor: the "Edit Manual Stats" number-input grid ─────────────
+// Shared between Overview and SiteDashboard. Renders 9 number inputs driven by
+// MANUAL_STAT_FIELDS so both call sites stay in lockstep.
+const ManualStatsEditor = ({draft,setDraft,C,minWidth=200}) => (
+  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fit,minmax(${minWidth}px,1fr))`,gap:12}}>
+    {MANUAL_STAT_FIELDS.map(({key,label})=>(
+      <Field key={key} label={label} C={C}>
+        <Inp C={C} type="number" value={draft[key]||0}
+          onChange={e=>setDraft(p=>({...p,[key]:Number(e.target.value)}))}/>
+      </Field>
+    ))}
+  </div>
+);
+// ── ProjectStatsGrid: the read-only "Project Statistics" tile row ────────────
+// Shared between Overview and SiteDashboard. Values pulled from a manualStats
+// object by key; colors resolved via C[colorKey] for theme-awareness.
+const ProjectStatsGrid = ({stats,C,minWidth=190}) => (
+  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fit,minmax(${minWidth}px,1fr))`,gap:10}}>
+    {PROJECT_STAT_TILES.map(({key,label,colorKey,format})=>{
+      const c = C[colorKey] || C.muted;
+      const raw = stats?.[key] || 0;
+      const v = format==="n" ? raw.toLocaleString() : raw;
+      return (
+        <div key={key} style={{background:c+"11",border:`1px solid ${c}33`,borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{color:C.sub,fontSize:12}}>{label}</span>
+          <span style={{color:c,fontWeight:800,fontSize:15}}>{v}</span>
+        </div>
+      );
+    })}
+  </div>
+);
+
+// ── DATE HELPERS — shared between Overview, KPITrendChart, etc. ──────────────
+// Builds a list of the last N months (default 6) as {yr, mo, label} so each
+// consumer can run its own filter over observations/NCRs/incidents without
+// re-implementing the Date math. The returned items expose an `inMonth(dateStr)`
+// predicate that safely handles null, empty, and invalid date inputs.
+const buildMonthWindow = (n=6) => {
+  const months = [];
+  for(let i=n-1; i>=0; i--){
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()-i);
+    const yr = d.getFullYear(), mo = d.getMonth();
+    const label = d.toLocaleString("default",{month:"short"});
+    months.push({
+      yr, mo, label, month: label,
+      inMonth: (dateStr) => {
+        if(!dateStr) return false;
+        const p = new Date(dateStr);
+        return !isNaN(p) && p.getFullYear()===yr && p.getMonth()===mo;
+      },
+    });
+  }
+  return months;
+};
+
+// ── DATA HELPERS — per-site filters used by Overview + SiteDashboard ─────────
+const bySite = (rows, siteId) => (rows||[]).filter(r => r.site === siteId);
+// Today's date in YYYY-MM-DD — was inlined as 5+ variants of new Date()+padStart
+const todayStr = () => {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+};
+const nowTimeStr = () => {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
+};
 
 // ── KPI TREND CHART — live from Firebase obs, ncr, incidents ─────────────────
 // Builds 6-month rolling window from actual Firestore records.
@@ -413,67 +536,31 @@ const SavingBadge = ({saving,C}) => saving?(
 // IMPORTANT: incidents and observations are SEPARATE collections.
 // The chart never substitutes observations for incidents — 0 is shown as 0.
 const KPITrendChart = ({obs, ncr, incidents, C}) => {
-  const trendData = useMemo(()=>{
-    const months = [];
-    for(let i=5; i>=0; i--){
-      const d = new Date();
-      d.setDate(1);
-      d.setMonth(d.getMonth() - i);
-      const yr  = d.getFullYear();
-      const mo  = d.getMonth();
-      const lbl = d.toLocaleString("default",{month:"short"});
+  const trendData = useMemo(()=>buildMonthWindow(6).map(m=>{
+    const monthObs = obs.filter(o=>m.inMonth(o.date));
+    const monthNcr = ncr.filter(n=>m.inMonth(n.date||n.created_at));
+    const monthIncidents = (incidents||[]).filter(inc=>m.inMonth(inc.date));
+    const damCode = (inc) => (inc.damInjEnv||"").toUpperCase().trim();
+    return {
+      month:        m.label,
+      observations: monthObs.length,
+      nearMiss:     monthObs.filter(o=>o.type==="Near Miss").length,
+      incidents:    monthIncidents.length,
+      injuries:     monthIncidents.filter(inc=>["INJ","FAC","MTC","LTI","RWC"].includes(damCode(inc))).length,
+      mva:          monthIncidents.filter(inc=>damCode(inc)==="MVA").length,
+      ncrOpen:      monthNcr.filter(n=>n.status!=="Closed").length,
+      positiveObs:  monthObs.filter(o=>o.type==="Good Practice").length,
+    };
+  }),[obs, ncr, incidents]);
 
-      const inMonth = (dateStr) => {
-        if(!dateStr) return false;
-        const p = new Date(dateStr);
-        return !isNaN(p) && p.getFullYear()===yr && p.getMonth()===mo;
-      };
-
-      // ── Observations (from obs collection) ────────────────────────────────
-      const monthObs = obs.filter(o=>inMonth(o.date));
-      const monthNcr = ncr.filter(n=>inMonth(n.date||n.created_at));
-
-      // ── Incidents (from incidents register collection only) ────────────────
-      // NEVER fall back to observations — if register is empty, show 0
-      const monthIncidents = (incidents||[]).filter(inc=>inMonth(inc.date));
-      const totalInc  = monthIncidents.length;
-      const injuries  = monthIncidents.filter(inc=>
-        ["INJ","FAC","MTC","LTI","RWC"].includes((inc.damInjEnv||"").toUpperCase().trim())
-      ).length;
-      const mvaCount  = monthIncidents.filter(inc=>
-        (inc.damInjEnv||"").toUpperCase().trim()==="MVA"
-      ).length;
-
-      months.push({
-        month:        lbl,
-        // Observations — count of logged obs records
-        observations: monthObs.length,
-        // Near Miss — obs typed as Near Miss
-        nearMiss:     monthObs.filter(o=>o.type==="Near Miss").length,
-        // Incidents — count from incident register ONLY (0 if register empty)
-        incidents:    totalInc,
-        // Injury sub-type from register
-        injuries,
-        // MVA sub-type from register
-        mva:          mvaCount,
-        // Open NCRs this month
-        ncrOpen:      monthNcr.filter(n=>n.status!=="Closed").length,
-        // Positive obs
-        positiveObs:  monthObs.filter(o=>o.type==="Good Practice").length,
-      });
-    }
-    return months;
-  },[obs, ncr, incidents]);
-
-  // Show live indicator only when the relevant collection has data
-  const hasObs      = obs.length > 0;
-  const hasInc      = (incidents||[]).length > 0;
-  const hasNcr      = ncr.length > 0;
+  const hasObs = obs.length > 0;
+  const hasInc = (incidents||[]).length > 0;
+  const hasNcr = ncr.length > 0;
 
   return(
-    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+    <Card C={C}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
-        <h3 style={{color:C.text,fontWeight:700,margin:0,fontSize:14}}>6-Month KPI Trend</h3>
+        <SectionTitle C={C} style={{margin:0}}>6-Month KPI Trend</SectionTitle>
         <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
           {[["Obs",hasObs,C.teal],["Incidents",hasInc,C.red],["NCR",hasNcr,C.indigo]].map(([lbl,active,col])=>(
             <div key={lbl} style={{display:"flex",alignItems:"center",gap:4}}>
@@ -488,10 +575,7 @@ const KPITrendChart = ({obs, ncr, incidents, C}) => {
           <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
           <XAxis dataKey="month" tick={{fill:C.muted,fontSize:11}}/>
           <YAxis tick={{fill:C.muted,fontSize:11}} allowDecimals={false}/>
-          <Tooltip
-            contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}
-            formatter={(value, name) => [value, name]}
-          />
+          <Tooltip contentStyle={chartTooltip(C)} formatter={(value, name) => [value, name]}/>
           <Legend/>
           <Line type="monotone" dataKey="observations" name="Observations" stroke={C.teal}   strokeWidth={2} dot={{r:3}}/>
           <Line type="monotone" dataKey="incidents"    name="Incidents"    stroke={C.red}    strokeWidth={2} dot={{r:3}}/>
@@ -504,7 +588,7 @@ const KPITrendChart = ({obs, ncr, incidents, C}) => {
           ⚠️ Incident register is empty — log incidents via the Weekly → Incident Register section to populate this chart.
         </div>
       )}
-    </div>
+    </Card>
   );
 };
 
@@ -709,7 +793,7 @@ const KPIDashboard = ({userRole,kpis,setKpis,radarData,setRadarData,obs=[],ncr=[
             <PolarAngleAxis dataKey="subject" tick={{fill:C.sub,fontSize:11}}/>
             <PolarRadiusAxis domain={[0,100]} tick={{fill:C.muted,fontSize:10}}/>
             <Radar name="Score" dataKey="A" stroke={C.teal} fill={C.teal} fillOpacity={0.3}/>
-            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
+            <Tooltip contentStyle={chartTooltip(C)}/>
           </RadarChart>
         </ResponsiveContainer>
       </div>
@@ -967,9 +1051,8 @@ const ObsDetail = ({obs,onClose,C}) => (
 
 // ── OBS FORM ──────────────────────────────────────────────────────────────────
 const ObsForm = ({user,zones,obsTypes,actionsList,obsSeverity,obsCount,onSubmit,onClose,C}) => {
-  const _of=new Date();
-  const today=`${_of.getFullYear()}-${String(_of.getMonth()+1).padStart(2,"0")}-${String(_of.getDate()).padStart(2,"0")}`;
-  const nowTime=`${String(_of.getHours()).padStart(2,"0")}:${String(_of.getMinutes()).padStart(2,"0")}`;
+  const today   = todayStr();
+  const nowTime = nowTimeStr();
   const defaultSite=user.site==="All Sites"?"Site 1":user.site;
   const [form,setForm]=useState({date:today,time:nowTime,area:zones[0]||"",type:obsTypes[0]||"",severity:(obsSeverity||DEFAULT_OBS_SEVERITY)[0]||"High",action:actionsList[0]||"",status:"Open",desc:"",site:defaultSite});
   // ID is computed from current site so it updates when user changes site
@@ -1116,10 +1199,7 @@ const ObsForm = ({user,zones,obsTypes,actionsList,obsSeverity,obsCount,onSubmit,
 
 // ── CLOSEOUT MODAL ────────────────────────────────────────────────────────────
 const CloseoutModal = ({obs,onClose,C}) => {
-  const _cn=new Date();
-  const today=`${_cn.getFullYear()}-${String(_cn.getMonth()+1).padStart(2,"0")}-${String(_cn.getDate()).padStart(2,"0")}`;
-  const nowTime=`${String(_cn.getHours()).padStart(2,"0")}:${String(_cn.getMinutes()).padStart(2,"0")}`;
-  const [closeDate,setCloseDate]=useState(today),[closeTime,setCloseTime]=useState(nowTime);
+  const [closeDate,setCloseDate]=useState(todayStr()),[closeTime,setCloseTime]=useState(nowTimeStr());
   const [photo,setPhoto]=useState(null),[preview,setPreview]=useState(obs.closePhoto||null),[uploading,setUploading]=useState(false);
   const handlePhoto=e=>{const f=e.target.files[0];if(!f)return;setPhoto(f);setPreview(URL.createObjectURL(f));};
   const save=async()=>{
@@ -1371,9 +1451,8 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
     if(failed>0) alert(`⚠️ ${failed} record(s) could not be deleted. Check your permissions.`);
   };
   const bulkClose=async()=>{
-    const _n=new Date();
-    const d=`${_n.getFullYear()}-${String(_n.getMonth()+1).padStart(2,"0")}-${String(_n.getDate()).padStart(2,"0")}`;
-    const t=`${String(_n.getHours()).padStart(2,"0")}:${String(_n.getMinutes()).padStart(2,"0")}`;
+    const d = todayStr();
+    const t = nowTimeStr();
     let failed=0;
     for(const id of selected){
       const o=obs.find(x=>x._docId===id);
@@ -1546,13 +1625,11 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
         />
       )}
 
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:10}}>
+      <PillGrid minWidth={110}>
         {[["Total",counts.all,C.blue],["Open",counts.open,C.red],["High Risk",counts.high,C.orange],["Good Practice",counts.positive,C.green]].map(([l,v,c])=>(
-          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
-            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div><div style={{color:"#94a3b8",fontSize:11}}>{l}</div>
-          </div>
+          <StatPill key={l} label={l} value={v} color={c} C={C}/>
         ))}
-      </div>
+      </PillGrid>
 
       {/* ── Row 1: search + dropdowns + action buttons ── */}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -1714,33 +1791,15 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
 // Each hero card is clickable and navigates to that site's dedicated page.
 const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,userRole,kpis,computedDaysLTI,manpower=[],equipment=[],setActive,C}) => {
   // ── Compute live 6-month trend from actual observation + NCR data ─────────
-  const liveTrend = (() => {
-    const months = [];
-    for(let i=5; i>=0; i--){
-      const d  = new Date();
-      d.setDate(1);
-      d.setMonth(d.getMonth() - i);
-      const yr = d.getFullYear();
-      const mo = d.getMonth();
-      const label = d.toLocaleString("default",{month:"short"});
-      const inMonth = (dateStr) => {
-        if(!dateStr) return false;
-        const pd = new Date(dateStr);
-        return !isNaN(pd) && pd.getFullYear()===yr && pd.getMonth()===mo;
-      };
-      // incidents from the incidents register collection ONLY — never obs proxy
-      const monthInc = (incidents||[]).filter(inc=>inMonth(inc.date));
-      months.push({
-        month:        label,
-        observations: obs.filter(o=>inMonth(o.date)).length,
-        incidents:    monthInc.length,
-        nearMiss:     obs.filter(o=>inMonth(o.date)&&o.type==="Near Miss").length,
-        ncrOpen:      ncr.filter(n=>inMonth(n.date)&&n.status!=="Closed").length,
-        welfare:      87,
-      });
-    }
-    return months;
-  })();
+  const liveTrend = buildMonthWindow(6).map(m => ({
+    month:        m.label,
+    observations: obs.filter(o => m.inMonth(o.date)).length,
+    // Incidents come from the incidents register collection ONLY — never obs proxy
+    incidents:    (incidents||[]).filter(i => m.inMonth(i.date)).length,
+    nearMiss:     obs.filter(o => m.inMonth(o.date) && o.type==="Near Miss").length,
+    ncrOpen:      ncr.filter(n => m.inMonth(n.date) && n.status!=="Closed").length,
+    welfare:      87,
+  }));
   const [editStats,setEditStats]=useState(false),[draft,setDraft]=useState(manualStats),[saving,setSaving]=useState(false);
   // FIX: sync draft when Firestore data loads in after mount
   useEffect(()=>{ if(!editStats) setDraft(manualStats); },[manualStats, editStats]);
@@ -1787,19 +1846,16 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
     {id:"Site 2", navId:"site2", label:"Palm2 Al-Madinah Project",   short:"Palm2", accent:C.purple, grad:"linear-gradient(135deg,#4c1d95,#5b21b6)"},
     {id:"Site 3", navId:"site3", label:"Site 3",                     short:"Site 3",accent:C.orange, grad:"linear-gradient(135deg,#7c2d12,#9a3412)"},
   ].map(s => {
-    const sObs = (obs||[]).filter(o => o.site === s.id);
-    const sNcr = (ncr||[]).filter(n => n.site === s.id);
-    const sMp  = (manpower||[]).filter(m => m.site === s.id);
-    const sInc = (incidents||[]).filter(i => i.site === s.id);
+    const sObs = bySite(obs, s.id);
+    const sNcr = bySite(ncr, s.id);
+    const sMp  = bySite(manpower, s.id);
+    const sInc = bySite(incidents, s.id);
     // Per-site Days-LTI override (if present in manualStats), else global value
-    const siteDaysLTI = manualStats?.perSite?.[s.id]?.daysLTI
-                      ?? (computedDaysLTI ?? manualStats?.daysLTI ?? 0);
-    const siteMHWeek  = manualStats?.perSite?.[s.id]?.manhoursWeek
-                      ?? manualStats?.manhoursWeek
-                      ?? 0;
+    const perSite = manualStats?.perSite?.[s.id] || {};
     return {
       ...s,
-      daysLTI:     siteDaysLTI,
+      daysLTI:     perSite.daysLTI ?? (computedDaysLTI ?? manualStats?.daysLTI ?? 0),
+      mhWeek:      perSite.manhoursWeek ?? manualStats?.manhoursWeek ?? 0,
       openObs:     sObs.filter(o=>o.status==="Open").length,
       criticalNcr: sNcr.filter(n=>n.severity==="Critical").length,
       nearMiss:    sObs.filter(o=>o.type==="Near Miss").length,
@@ -1807,7 +1863,6 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
       totalNcr:    sNcr.length,
       mp:          sMp.length,
       inc:         sInc.length,
-      mhWeek:      siteMHWeek,
     };
   });
   // ── Comparison chart data: observations / NCR / near-miss per site ─────────
@@ -1902,7 +1957,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
             <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
             <XAxis dataKey="site" tick={{fill:C.muted,fontSize:11}}/>
             <YAxis tick={{fill:C.muted,fontSize:11}}/>
-            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
+            <Tooltip contentStyle={chartTooltip(C)}/>
             <Legend/>
             <Bar dataKey="Observations" fill={C.teal}    radius={[4,4,0,0]}/>
             <Bar dataKey="Open Obs"     fill={C.orange}  radius={[4,4,0,0]}/>
@@ -1916,11 +1971,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
       {editStats&&(
         <div style={{background:C.card,border:`1px solid ${C.blue}44`,borderRadius:14,padding:20}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>📊 Edit Manual Stats</h3>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12}}>
-            {[["Days Without LTI","daysLTI"],["Manpower","manpower"],["Man-hours (Week)","manhoursWeek"],["Man-hours (Month)","manhoursMonth"],["Man-hours (Year)","manhoursYear"],["Man-hours (Project)","manhoursProject"],["Safety Officers","safetyOfficers"],["First Aiders","firstAiders"],["TBT Attendees","tbtAttendees"]].map(([l,k])=>(
-              <Field key={k} label={l} C={C}><Inp C={C} type="number" value={draft[k]} onChange={e=>setDraft(p=>({...p,[k]:Number(e.target.value)}))}/></Field>
-            ))}
-          </div>
+          <ManualStatsEditor draft={draft} setDraft={setDraft} C={C} minWidth={200}/>
         </div>
       )}
       {/* NOTE: Option B layout removes the global StatBox strip and the
@@ -1936,13 +1987,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
       </div>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
         <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>📋 Project Statistics</h3>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:10}}>
-          {[["👷 Manpower",(manualStats?.manpower||0).toLocaleString(),C.purple],["⏱ Man-hours (Week)",(manualStats?.manhoursWeek||0).toLocaleString(),C.teal],["📅 Man-hours (Month)",(manualStats?.manhoursMonth||0).toLocaleString(),C.blue],["📆 Man-hours (Year)",(manualStats?.manhoursYear||0).toLocaleString(),C.indigo],["🏗 Man-hours (Project)",(manualStats?.manhoursProject||0).toLocaleString(),C.green],["👮 Safety Officers",manualStats?.safetyOfficers||0,C.blue],["🏥 First Aiders",manualStats?.firstAiders||0,C.orange],["📢 TBT Attendees",(manualStats?.tbtAttendees||0).toLocaleString(),C.teal]].map(([l,v,c])=>(
-            <div key={l} style={{background:c+"11",border:`1px solid ${c}33`,borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{color:C.sub,fontSize:12}}>{l}</span><span style={{color:c,fontWeight:800,fontSize:15}}>{v}</span>
-            </div>
-          ))}
-        </div>
+        <ProjectStatsGrid stats={manualStats} C={C} minWidth={190}/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16}}>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
@@ -1955,7 +2000,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
               <XAxis dataKey="month" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted,fontSize:11}}/>
-              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/>
+              <Tooltip contentStyle={chartTooltip(C)}/><Legend/>
               <Area type="monotone" dataKey="observations" name="Observations" stroke={C.teal} fill="url(#g1)" strokeWidth={2}/>
               <Area type="monotone" dataKey="incidents" name="Incidents" stroke={C.red} fill="url(#g2)" strokeWidth={2}/>
             </AreaChart>
@@ -1968,7 +2013,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
               <Pie data={[{name:"Open",value:obs.filter(o=>o.status==="Open").length||1},{name:"Closed",value:obs.filter(o=>o.status==="Closed").length||1},{name:"Under Review",value:obs.filter(o=>o.status==="Under Review").length||1}]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} dataKey="value" paddingAngle={4}>
                 {[C.red,C.green,C.blue].map((c,i)=><Cell key={i} fill={c}/>)}
               </Pie>
-              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/>
+              <Tooltip contentStyle={chartTooltip(C)}/><Legend/>
             </PieChart>
           </ResponsiveContainer>
         </div>
@@ -2588,8 +2633,7 @@ const NCR = ({user,ncr,ncrCats=DEFAULT_NCR_CATS,ncrSeverity=DEFAULT_NCR_SEVERITY
   const [showForm,setShowForm]=useState(false);
   const [showBulk,setShowBulk]=useState(false);
   const role=ROLE_META[user.role];
-  const _nd=new Date();
-  const today=`${_nd.getFullYear()}-${String(_nd.getMonth()+1).padStart(2,"0")}-${String(_nd.getDate()).padStart(2,"0")}`;
+  const today = todayStr();
   const defaultSite=user.site==="All Sites"?"Site 1":user.site;
   const [form,setForm]=useState({date:today,category:ncrCats[0]||"PPE",severity:ncrSeverity[0]||"Major",site:defaultSite,assignee:"",due:"",status:ncrStatus[0]||"Open",closure:0,desc:""});
   // ID recomputes when site changes
@@ -2610,13 +2654,11 @@ const NCR = ({user,ncr,ncrCats=DEFAULT_NCR_CATS,ncrSeverity=DEFAULT_NCR_SEVERITY
   };
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
+      <PillGrid minWidth={130}>
         {[["Total",ncr.length,C.blue],["Critical",ncr.filter(n=>n.severity==="Critical").length,C.red],["Overdue",ncr.filter(n=>n.status==="Overdue").length,C.orange],["Closed",ncr.filter(n=>n.status==="Closed").length,C.green]].map(([l,v,c])=>(
-          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
-            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div><div style={{color:"#94a3b8",fontSize:11}}>{l}</div>
-          </div>
+          <StatPill key={l} label={l} value={v} color={c} C={C}/>
         ))}
-      </div>
+      </PillGrid>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,flexWrap:"wrap"}}>
         {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.orange}><Plus size={14}/>Raise NCR</Btn>}
         {role.canAdd&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
@@ -2751,7 +2793,7 @@ const Risk = ({user,risks,riskCats=DEFAULT_RISK_CATS,riskStatus=DEFAULT_RISK_STA
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>Distribution</h3>
           <ResponsiveContainer width="100%" height={180}>
-            <PieChart><Pie data={[{name:"Critical",value:risks.filter(r=>riskScore(r)>=15).length||1},{name:"High",value:risks.filter(r=>{const s=riskScore(r);return s>=8&&s<15;}).length||1},{name:"Medium",value:risks.filter(r=>{const s=riskScore(r);return s>=4&&s<8;}).length||1},{name:"Low",value:risks.filter(r=>riskScore(r)<4).length||1}]} cx="50%" cy="50%" outerRadius={70} dataKey="value" label={({name,value})=>`${name}:${value}`}>{[C.red,C.orange,C.yellow,C.green].map((c,i)=><Cell key={i} fill={c}/>)}</Pie><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/></PieChart>
+            <PieChart><Pie data={[{name:"Critical",value:risks.filter(r=>riskScore(r)>=15).length||1},{name:"High",value:risks.filter(r=>{const s=riskScore(r);return s>=8&&s<15;}).length||1},{name:"Medium",value:risks.filter(r=>{const s=riskScore(r);return s>=4&&s<8;}).length||1},{name:"Low",value:risks.filter(r=>riskScore(r)<4).length||1}]} cx="50%" cy="50%" outerRadius={70} dataKey="value" label={({name,value})=>`${name}:${value}`}>{[C.red,C.orange,C.yellow,C.green].map((c,i)=><Cell key={i} fill={c}/>)}</Pie><Tooltip contentStyle={chartTooltip(C)}/></PieChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -3102,25 +3144,38 @@ const BODY_PARTS = [
   "Knee","Leg","Multiple","Neck","Nose","Pelvis","Shoulder","Toe, toenail","Trunk","Wrist","Other",
 ];
 
-// Derive classification from DAM/INJ/ENV code
-const deriveClassification = (code) => {
-  const t = (code||"").toUpperCase().trim();
-  if(["FAC","MTC","RWC","LTI","INJ"].includes(t)) return "Injury";
-  if(["MVA","PD","PD (FIRE)"].includes(t))        return "Damage-Only";
-  if(t==="ENV")                                    return "Environmental";
-  return "Damage-Only";
+// ── INCIDENT CLASSIFICATION TABLE ────────────────────────────────────────────
+// Every incident-code helper below reads from this ONE table instead of
+// re-listing the codes. If a new code is added (e.g. "PSE"), add a single row.
+// Fields per row:
+//   group       — "Injury" | "Damage-Only" | "Environmental"
+//   fullLabel   — long display label, e.g. "First Aid Case (FAC)"
+//   badgeLabel  — short badge label, e.g. "FAC – First Aid"
+//   defaultType — the default sub-type value when the code is selected
+//   color       — dot/tag color for the code
+const INCIDENT_CODES = {
+  INJ:         {group:"Injury",        fullLabel:"Injury (INJ)",              badgeLabel:"INJ – Injury",    defaultType:"INJ",          color:"#ef4444"},
+  FAC:         {group:"Injury",        fullLabel:"First Aid Case (FAC)",      badgeLabel:"FAC – First Aid", defaultType:"FAC",          color:"#eab308"},
+  MTC:         {group:"Injury",        fullLabel:"Medical Treatment (MTC)",   badgeLabel:"MTC – Medical",   defaultType:"MTC",          color:"#fb923c"},
+  LTI:         {group:"Injury",        fullLabel:"Lost Time Injury (LTI)",    badgeLabel:"LTI – Lost Time", defaultType:"LTI",          color:"#dc2626"},
+  RWC:         {group:"Injury",        fullLabel:"Restricted Work Case (RWC)",badgeLabel:"RWC – Restricted",defaultType:"RWC",          color:"#f97316"},
+  MVA:         {group:"Damage-Only",   fullLabel:"Motor Vehicle Accident",    badgeLabel:"MVA – Vehicle",   defaultType:"Asset",        color:"#a855f7"},
+  PD:          {group:"Damage-Only",   fullLabel:"Property Damage",           badgeLabel:"PD – Property",   defaultType:"Asset",        color:"#3b82f6"},
+  "PD (FIRE)": {group:"Damage-Only",   fullLabel:"Property Damage – Fire",    badgeLabel:"PD – Fire",       defaultType:"Fire",         color:"#f43f5e"},
+  ENV:         {group:"Environmental", fullLabel:"Environmental",             badgeLabel:"ENV",             defaultType:"Oil spillage", color:"#22c55e"},
 };
+const incCode = (code) => INCIDENT_CODES[(code||"").toUpperCase().trim()] || null;
+// Convenience arrays (used in .filter(...).includes()) — derived once, no dup.
+const INJURY_TYPES = Object.keys(INCIDENT_CODES).filter(k=>INCIDENT_CODES[k].group==="Injury");
+const DAMAGE_TYPES = Object.keys(INCIDENT_CODES).filter(k=>INCIDENT_CODES[k].group==="Damage-Only");
+const ENV_TYPES    = Object.keys(INCIDENT_CODES).filter(k=>INCIDENT_CODES[k].group==="Environmental");
+
+// Derive classification from DAM/INJ/ENV code
+const deriveClassification = (code) => incCode(code)?.group || "Damage-Only";
 
 // Derive "Type" sub-field from DAM/INJ/ENV code
-const deriveType = (code, currentClassification) => {
-  const t = (code||"").toUpperCase().trim();
-  if(["FAC","MTC","RWC","LTI","INJ"].includes(t)) return t; // type IS the subtype for injuries
-  if(t==="MVA")         return "Asset";
-  if(t==="PD (FIRE)")   return "Fire";
-  if(t==="PD")          return "Asset";
-  if(t==="ENV")         return "Oil spillage";
-  return "";
-};
+// eslint-disable-next-line no-unused-vars
+const deriveType = (code, currentClassification) => incCode(code)?.defaultType || "";
 
 const ROOT_CAUSES = [
   "Sub-standard Housekeeping","Neglecting Safety Procedures","Lack of competency",
@@ -3137,60 +3192,26 @@ const RA_LEVELS = [
   {label:"High",color:"#f97316"},{label:"Critical",color:"#ef4444"},
 ];
 
-const incidentColor = (type, C) => ({
-  INJ:"#ef4444", LTI:"#dc2626", RWC:"#f97316", MTC:"#fb923c",
-  FAC:"#eab308", MVA:"#a855f7", PD:"#3b82f6", "PD (FIRE)":"#f43f5e",
-  ENV:"#22c55e"
-}[(type||"").toUpperCase().trim()] || C.muted);
+const incidentColor = (type, C) => incCode(type)?.color || C.muted;
 
-// Full classification label: combines Injury/Damage/Environmental with injury subtype
-// e.g. damInjEnv="FAC" → "Injury · FAC"
-//      damInjEnv="MVA" → "Damage-Only · MVA"
-//      damInjEnv="ENV" → "Environmental"
-const INJURY_TYPES   = ["INJ","FAC","MTC","LTI","RWC"];
-const DAMAGE_TYPES   = ["MVA","PD","PD (FIRE)"];
-const ENV_TYPES      = ["ENV"];
-
+// Full classification label: combines Injury/Damage/Environmental with injury subtype.
+// Falls back to the free-text classificationField if no code is set.
 const classificationLabel = (damInjEnv, classificationField) => {
-  const t = (damInjEnv||"").toUpperCase().trim();
-  if(!t) return classificationField||"—";
-  if(INJURY_TYPES.includes(t)) {
-    const subLabel = {
-      INJ: "Injury (INJ)",
-      FAC: "First Aid Case (FAC)",
-      MTC: "Medical Treatment (MTC)",
-      LTI: "Lost Time Injury (LTI)",
-      RWC: "Restricted Work Case (RWC)",
-    }[t] || t;
-    return subLabel;
-  }
-  if(DAMAGE_TYPES.includes(t)) {
-    const subLabel = {
-      MVA:        "Motor Vehicle Accident",
-      PD:         "Property Damage",
-      "PD (FIRE)":"Property Damage – Fire",
-    }[t] || t;
-    return subLabel;
-  }
-  if(ENV_TYPES.includes(t)) return "Environmental";
-  return classificationField || t;
+  const c = incCode(damInjEnv);
+  if(!c) return classificationField || (damInjEnv||"").toUpperCase().trim() || "—";
+  return c.fullLabel;
 };
 
 // Short badge label for compact display
-const classificationBadge = (damInjEnv) => {
-  const t = (damInjEnv||"").toUpperCase().trim();
-  return { INJ:"INJ – Injury", FAC:"FAC – First Aid", MTC:"MTC – Medical",
-           LTI:"LTI – Lost Time", RWC:"RWC – Restricted",
-           MVA:"MVA – Vehicle", PD:"PD – Property", "PD (FIRE)":"PD – Fire",
-           ENV:"ENV" }[t] || t || "—";
-};
+const classificationBadge = (damInjEnv) =>
+  incCode(damInjEnv)?.badgeLabel || (damInjEnv||"").toUpperCase().trim() || "—";
 
-// Color for classification category
+// Color for classification category (group-level, not code-level)
 const classColor = (damInjEnv, C) => {
-  const t = (damInjEnv||"").toUpperCase().trim();
-  if(INJURY_TYPES.includes(t))  return C.red;
-  if(DAMAGE_TYPES.includes(t))  return C.purple;
-  if(ENV_TYPES.includes(t))     return C.green;
+  const g = incCode(damInjEnv)?.group;
+  if(g==="Injury")        return C.red;
+  if(g==="Damage-Only")   return C.purple;
+  if(g==="Environmental") return C.green;
   return C.muted;
 };
 
@@ -3539,7 +3560,7 @@ const IncidentRegisterPanel = ({incidents, onAddIncident, onDeleteIncident, user
                 <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
                 <XAxis dataKey="month" tick={{fill:C.muted,fontSize:11}}/>
                 <YAxis tick={{fill:C.muted,fontSize:10}} allowDecimals={false}/>
-                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
+                <Tooltip contentStyle={chartTooltip(C)}/>
                 <Legend/>
                 <Bar dataKey="Injuries"         fill="#ef4444" radius={[3,3,0,0]}/>
                 <Bar dataKey="MVA"              fill="#a855f7" radius={[3,3,0,0]}/>
@@ -3837,11 +3858,11 @@ const Weekly = ({weeklyData,setWeeklyData,manualStats,setManualStats,incidents=[
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 12px",fontSize:13}}>Safety Observations</h3>
-          <ResponsiveContainer width="100%" height={160}><PieChart><Pie data={obsData} cx="50%" cy="50%" outerRadius={60} dataKey="value" label={({name,value})=>`${name}: ${value}`}>{obsData.map((d,i)=><Cell key={i} fill={d.fill}/>)}</Pie><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/></PieChart></ResponsiveContainer>
+          <ResponsiveContainer width="100%" height={160}><PieChart><Pie data={obsData} cx="50%" cy="50%" outerRadius={60} dataKey="value" label={({name,value})=>`${name}: ${value}`}>{obsData.map((d,i)=><Cell key={i} fill={d.fill}/>)}</Pie><Tooltip contentStyle={chartTooltip(C)}/></PieChart></ResponsiveContainer>
         </div>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 12px",fontSize:13}}>Safe Man-Hours</h3>
-          <ResponsiveContainer width="100%" height={160}><BarChart data={manHours}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="name" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted,fontSize:10}}/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}} formatter={v=>v.toLocaleString()}/><Bar dataKey="value" fill={C.teal} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
+          <ResponsiveContainer width="100%" height={160}><BarChart data={manHours}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="name" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted,fontSize:10}}/><Tooltip contentStyle={chartTooltip(C)} formatter={v=>v.toLocaleString()}/><Bar dataKey="value" fill={C.teal} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
         </div>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 12px",fontSize:13}}>Key Stats</h3>
@@ -3975,12 +3996,12 @@ const Monthly = ({obs,ncr,monthlyState,setMonthlyState,C}) => {
           )}
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
             <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>6-Month HSSE Trend</h3>
-            <ResponsiveContainer width="100%" height={250}><LineChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/><Line type="monotone" dataKey="observations" stroke={C.teal} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="nearMiss" stroke={C.yellow} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="incidents" stroke={C.red} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="welfare" stroke={C.purple} strokeWidth={2} dot={{r:3}}/></LineChart></ResponsiveContainer>
+            <ResponsiveContainer width="100%" height={250}><LineChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={chartTooltip(C)}/><Legend/><Line type="monotone" dataKey="observations" stroke={C.teal} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="nearMiss" stroke={C.yellow} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="incidents" stroke={C.red} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="welfare" stroke={C.purple} strokeWidth={2} dot={{r:3}}/></LineChart></ResponsiveContainer>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16}}>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
               <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>NCR Trend</h3>
-              <ResponsiveContainer width="100%" height={200}><BarChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Bar dataKey="ncrOpen" name="Open NCRs" fill={C.orange} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height={200}><BarChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={chartTooltip(C)}/><Bar dataKey="ncrOpen" name="Open NCRs" fill={C.orange} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
               <h3 style={{color:C.text,fontWeight:700,margin:"0 0 4px",fontSize:14}}>Monthly Summary</h3>
@@ -4047,7 +4068,7 @@ const Monthly = ({obs,ncr,monthlyState,setMonthlyState,C}) => {
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
             <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>KPI Trend Chart (%)</h3>
             <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={kpiChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}} formatter={v=>`${v}%`}/><Legend/>
+              <LineChart data={kpiChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={chartTooltip(C)} formatter={v=>`${v}%`}/><Legend/>
                 {kpiItems.map((k,i)=><Line key={k} type="monotone" dataKey={k} stroke={KPI_COLORS_PALETTE[i%KPI_COLORS_PALETTE.length]} strokeWidth={2} dot={{r:3}}/>)}
               </LineChart>
             </ResponsiveContainer>
@@ -4109,7 +4130,7 @@ const Monthly = ({obs,ncr,monthlyState,setMonthlyState,C}) => {
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
             <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>PCI Trend Chart (%)</h3>
             <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={pciChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}} formatter={v=>`${v}%`}/><Legend/>
+              <LineChart data={pciChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={chartTooltip(C)} formatter={v=>`${v}%`}/><Legend/>
                 {pciItems.map((k,i)=><Line key={k} type="monotone" dataKey={k} stroke={KPI_COLORS_PALETTE[i%KPI_COLORS_PALETTE.length]} strokeWidth={2} dot={{r:3}}/>)}
               </LineChart>
             </ResponsiveContainer>
@@ -4181,7 +4202,7 @@ const Welfare = ({welfareItems,setWelfareItems,C}) => {
           <RadarChart data={welfareItems.map(w=>({subject:w.category.split(" ")[0],A:w.score}))}>
             <PolarGrid stroke={C.border}/><PolarAngleAxis dataKey="subject" tick={{fill:C.sub,fontSize:11}}/><PolarRadiusAxis domain={[0,100]} tick={{fill:C.muted,fontSize:10}}/>
             <Radar name="Score" dataKey="A" stroke={C.purple} fill={C.purple} fillOpacity={0.3}/>
-            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
+            <Tooltip contentStyle={chartTooltip(C)}/>
           </RadarChart>
         </ResponsiveContainer>
       </div>
@@ -4315,13 +4336,11 @@ const UserMgmt = ({firestoreUsers,setFirestoreUsers,userRole,C}) => {
         </div>
       )}
 
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
+      <PillGrid minWidth={130}>
         {[["Total",firestoreUsers.length,C.blue],["Admins",firestoreUsers.filter(u=>u.role==="admin").length,C.red],["Editors",firestoreUsers.filter(u=>u.role==="editor").length,C.orange],["Viewers",firestoreUsers.filter(u=>u.role==="viewer").length,C.teal]].map(([l,v,c])=>(
-          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
-            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div><div style={{color:"#94a3b8",fontSize:11}}>{l}</div>
-          </div>
+          <StatPill key={l} label={l} value={v} color={c} C={C}/>
         ))}
-      </div>
+      </PillGrid>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,alignItems:"center"}}>
         <span style={{color:C.muted,fontSize:11}}>Role: <strong style={{color:userRole==="admin"?C.green:C.orange}}>{userRole||"unknown"}</strong></span>
         {userRole==="admin"&&<Btn onClick={openAdd} color={C.blue}><Plus size={14}/>Add User</Btn>}
@@ -5270,11 +5289,7 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
           {editStats&&(
             <div style={{background:C.card,border:`1px solid ${accent}44`,borderRadius:14,padding:18}}>
               <div style={{color:C.text,fontWeight:700,fontSize:13,marginBottom:12}}>📝 Edit {site.name} Manual Statistics</div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
-                {[["Days Without LTI","daysLTI"],["Manpower","manpower"],["Man-hours (Week)","manhoursWeek"],["Man-hours (Month)","manhoursMonth"],["Man-hours (Year)","manhoursYear"],["Man-hours (Project)","manhoursProject"],["Safety Officers","safetyOfficers"],["First Aiders","firstAiders"],["TBT Attendees","tbtAttendees"]].map(([l,k])=>(
-                  <Field key={k} label={l} C={C}><Inp C={C} type="number" value={draft[k]||0} onChange={e=>setDraft(p=>({...p,[k]:Number(e.target.value)}))}/></Field>
-                ))}
-              </div>
+              <ManualStatsEditor draft={draft} setDraft={setDraft} C={C} minWidth={180}/>
             </div>
           )}
           {/* Stat cards */}
@@ -5292,13 +5307,7 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
               <span>📋 {site.name} — Project Statistics</span>
               {statsEmpty && <span style={{color:C.muted,fontSize:11,fontWeight:500}}>(no site-specific stats yet — click "Edit Stats" to set values for this project)</span>}
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(185px,1fr))",gap:10}}>
-              {[["👷 Manpower",(displayStats.manpower||0).toLocaleString(),C.purple],["⏱ Man-hours (Week)",(displayStats.manhoursWeek||0).toLocaleString(),C.teal],["📅 Man-hours (Month)",(displayStats.manhoursMonth||0).toLocaleString(),C.blue],["📆 Man-hours (Year)",(displayStats.manhoursYear||0).toLocaleString(),C.indigo],["🏗 Man-hours (Project)",(displayStats.manhoursProject||0).toLocaleString(),C.green],["👮 Safety Officers",displayStats.safetyOfficers||0,C.blue],["🏥 First Aiders",displayStats.firstAiders||0,C.orange],["📢 TBT Attendees",(displayStats.tbtAttendees||0).toLocaleString(),C.teal]].map(([l,v,c])=>(
-                <div key={l} style={{background:c+"11",border:`1px solid ${c}33`,borderRadius:10,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span style={{color:C.sub,fontSize:12}}>{l}</span><span style={{color:c,fontWeight:800,fontSize:14}}>{v}</span>
-                </div>
-              ))}
-            </div>
+            <ProjectStatsGrid stats={displayStats} C={C} minWidth={185}/>
           </div>
           {/* Charts row */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
@@ -5310,7 +5319,7 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
                     cx="50%" cy="50%" innerRadius={45} outerRadius={70} dataKey="value" paddingAngle={4}>
                     {[C.red,C.green,C.blue].map((c,i)=><Cell key={i} fill={c}/>)}
                   </Pie>
-                  <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/>
+                  <Tooltip contentStyle={chartTooltip(C)}/><Legend/>
                 </PieChart>
               </ResponsiveContainer>
             </div>
@@ -5320,7 +5329,7 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
                 <BarChart data={[{name:"Critical",v:(siteNcr||[]).filter(n=>n.severity==="Critical").length},{name:"Major",v:(siteNcr||[]).filter(n=>n.severity==="Major").length},{name:"Minor",v:(siteNcr||[]).filter(n=>n.severity==="Minor").length}]}>
                   <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
                   <XAxis dataKey="name" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted}}/>
-                  <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
+                  <Tooltip contentStyle={chartTooltip(C)}/>
                   <Bar dataKey="v" radius={[4,4,0,0]}>{[C.red,C.orange,C.yellow].map((c,i)=><Cell key={i} fill={c}/>)}</Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -6593,19 +6602,16 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
 
       {/* Summary strip */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
+      <PillGrid minWidth={130}>
         {[
-          ["Total Alerts",  deduped.length,        C.blue],
-          ["Critical/Expired",critCount,            C.red],
-          ["Warning",        warnCount,             C.orange],
-          ["Recipients",     recipCount,            C.teal],
+          ["Total Alerts",    deduped.length,  C.blue],
+          ["Critical/Expired",critCount,       C.red],
+          ["Warning",         warnCount,       C.orange],
+          ["Recipients",      recipCount,      C.teal],
         ].map(([l,v,c])=>(
-          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
-            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div>
-            <div style={{color:C.muted,fontSize:11}}>{l}</div>
-          </div>
+          <StatPill key={l} label={l} value={v} color={c} C={C}/>
         ))}
-      </div>
+      </PillGrid>
 
       {/* EmailJS config panel */}
       <div style={{background:C.card,border:`1px solid ${isReady?C.green+"55":C.orange+"55"}`,borderRadius:14,padding:18}}>
