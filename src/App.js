@@ -40,18 +40,29 @@ const NAV = [
   {id:"dropdowns",    label:"Dropdown Settings",  icon:Edit2,      color:"#0d9488", adminOnly:true},
 ];
 // Site-specific permissions: which nav items a user can see based on their assigned site
-const getSiteNavItems = (userSite, userRole, userPerms) => {
+// and their grants. A viewer with a grant for Site 2 can now see Site 2 in nav.
+const getSiteNavItems = (userSite, userRole, userPerms, grants = []) => {
+  // Sites where the user has ANY grant — these should show in nav even for viewers
+  const grantedSites = new Set(
+    (Array.isArray(grants) ? grants : [])
+      .filter(g => g && g.site && Array.isArray(g.actions) && g.actions.length > 0)
+      .map(g => g.site)
+  );
   return NAV.filter(n=>{
     // Admin sees everything
     if(userRole==="admin") return true;
     // adminOnly items — check explicit permissions
     if(n.adminOnly) return userPerms.includes(n.id);
-    // siteAccess items — show if user's site matches OR user has All Sites
+    // siteAccess items — show if user's site matches, user has All Sites,
+    // user has explicit permission, OR user has a grant for that site
     if(n.siteAccess){
       if(n.siteAccess==="All Sites") return userSite==="All Sites";
-      return userSite==="All Sites" || userSite===n.siteAccess || userPerms.includes(n.id);
+      if(userSite==="All Sites" || userSite===n.siteAccess) return true;
+      if(userPerms.includes(n.id)) return true;
+      if(grantedSites.has(n.siteAccess) || grantedSites.has("All Sites")) return true;
+      return false;
     }
-    // General items — show to all
+    // General items (e.g. "resources") — show to all logged-in users
     return true;
   });
 };
@@ -59,6 +70,65 @@ const DEFAULT_PERMISSIONS = {
   admin:  ["overview","site1","site2","site3","resources","notifications","users","dropdowns"],
   editor: ["resources"],
   viewer: ["resources"],
+};
+
+// ── SCOPED-GRANTS PERMISSION CHECK ────────────────────────────────────────────
+// Mirror of the backend's canDo(). The UI uses this to hide buttons the user
+// can't use (cosmetic + UX only — the backend enforces the real thing).
+//
+// Signature: can(user, section, site, action, record?)
+//   user    — userProfile object ({ role, site, grants, uid, ... })
+//   section — "observations" | "ncr" | "incidents" | "risks" | "equipment" | "manpower" | "weekly_reports"
+//   site    — "Site 1" | "Site 2" | "Site 3" | "" (for site-less sections)
+//   action  — "add" | "edit_own" | "edit_any" | "delete"
+//   record  — optional record object { created_by, site } — required for edit_own
+//
+// Rules (kept identical to netlify/functions/api.js canDo):
+//   • admin always wins
+//   • users/settings/dropdowns sections are admin-only (never grantable)
+//   • viewer must have an explicit matching grant
+//   • editor with NO grants keeps legacy blanket add/edit_any on accessible sites
+//   • editor WITH grants — grants become the sole source of truth
+const canAccessSiteClient = (user, site) => {
+  if(!user) return false;
+  if(user.role === "admin") return true;
+  if(user.site === "All Sites") return true;
+  if(!site) return true;
+  return user.site === site;
+};
+const can = (user, section, site, action, record = null) => {
+  if(!user) return false;
+  if(user.role === "admin") return true;
+  if(["users","settings","dropdowns"].includes(section)) return false;
+  if(!canAccessSiteClient(user, site)) return false;
+  const grants = Array.isArray(user.grants) ? user.grants : [];
+  const matching = grants.filter(g =>
+    g && g.section === section &&
+    (g.site === site || g.site === "All Sites") &&
+    Array.isArray(g.actions)
+  );
+  if(action === "edit_own") {
+    if(!record || !record.created_by) return false;
+    if(record.created_by !== user.uid) return false;
+    return matching.some(g => g.actions.includes("edit_own"));
+  }
+  if(matching.some(g => g.actions.includes(action))) return true;
+  // Legacy fallback: editor without ANY grants keeps old blanket behavior
+  if(user.role === "editor" && grants.length === 0) {
+    return ["add","edit_any"].includes(action);
+  }
+  return false;
+};
+// Convenience: can user do `action` on `section` at ANY accessible site?
+// Used for bulk operations (CSV export, import) where the button isn't tied
+// to a specific site.
+const canAnySite = (user, section, action) => {
+  if(!user) return false;
+  if(user.role === "admin") return true;
+  if(user.site === "All Sites") {
+    return ["Site 1","Site 2","Site 3"].some(s => can(user, section, s, action));
+  }
+  return can(user, section, user.site, action);
 };
 const DEFAULT_ZONES        = ["Zone A","Zone B","Zone C","Warehouse","Office","Tank Farm","Panel Room","Site Gate","Parking","Canteen"];
 const DEFAULT_OBS_TYPES    = ["Unsafe Act","Unsafe Condition","Near Miss","Good Practice","Environmental","Security"];
@@ -1649,15 +1719,19 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
             {opts.map(o=><option key={o} value={o}>{lbl?lbl(o):o}</option>)}
           </select>
         ))}
-        {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.teal}><Plus size={14}/>New</Btn>}
-        {/* Excel Import Button */}
-        {role.canAdd&&(
+        {can(user,"observations",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={C.teal}><Plus size={14}/>New</Btn>}
+        {/* Excel Import Button — needs 'add' to be useful since import inserts records */}
+        {can(user,"observations",user.site,"add")&&(
           <label style={{background:C.indigo,color:"#fff",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}} title="Select one or more Daily Observation Report Excel files to import">
             📥 Import Historical
             <input type="file" accept=".xlsx,.xls" multiple onChange={handleExcelUpload} style={{display:"none"}}/>
           </label>
         )}
-        <Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>
+        {/* Bulk Import — same permission as Import Historical (inserts records) */}
+        {can(user,"observations",user.site,"add")&&(
+          <Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>
+        )}
+        {/* CSV export stays available to anyone who can see the data */}
         <Btn onClick={()=>exportCSV(obs,"observations")} color={C.indigo}><Download size={14}/>CSV</Btn>
       </div>
 
@@ -1686,7 +1760,7 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
       </div>
 
       {/* Import hints */}
-      {role.canAdd&&(
+      {can(user,"observations",user.site,"add")&&(
         <div style={{background:C.indigo+"11",border:`1px solid ${C.indigo}33`,borderRadius:10,padding:"9px 14px",fontSize:12,color:C.indigo,display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontSize:15}}>📥</span>
           <span>Use <strong>📥 Import Historical</strong> to upload one or <strong>multiple</strong> past Daily Observation Report Excel files at once. The system reads Sheet1 from each file, sorts all records by date, skips duplicates automatically, and marks imported records with a <strong>📥 Historical</strong> badge.</span>
@@ -2660,8 +2734,8 @@ const NCR = ({user,ncr,ncrCats=DEFAULT_NCR_CATS,ncrSeverity=DEFAULT_NCR_SEVERITY
         ))}
       </PillGrid>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,flexWrap:"wrap"}}>
-        {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.orange}><Plus size={14}/>Raise NCR</Btn>}
-        {role.canAdd&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
+        {can(user,"ncr",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={C.orange}><Plus size={14}/>Raise NCR</Btn>}
+        {can(user,"ncr",user.site,"add")&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
         <Btn onClick={()=>exportCSV(ncr,"ncr-register")} color={C.indigo}><Download size={14}/>CSV</Btn>
       </div>
       {showBulk&&(
@@ -2756,8 +2830,8 @@ const Risk = ({user,risks,riskCats=DEFAULT_RISK_CATS,riskStatus=DEFAULT_RISK_STA
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,flexWrap:"wrap"}}>
-        {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.purple}><Plus size={14}/>Add Risk</Btn>}
-        {role.canAdd&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
+        {can(user,"risks",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={C.purple}><Plus size={14}/>Add Risk</Btn>}
+        {can(user,"risks",user.site,"add")&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
         <Btn onClick={()=>exportCSV(risks,"risk-register")} color={C.indigo}><Download size={14}/>CSV</Btn>
       </div>
       {showBulk&&(
@@ -3769,10 +3843,12 @@ const Weekly = ({weeklyData,setWeeklyData,manualStats,setManualStats,incidents=[
         </div>
         <div style={{padding:"10px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap",gap:8}}>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-            <label style={{background:C.teal,color:"#fff",borderRadius:8,padding:"6px 14px",fontWeight:700,fontSize:12,cursor:importing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:6,opacity:importing?0.6:1}}>
-              <Download size={12}/>{importing?"Importing...":"📊 Import Excel"}
-              <input type="file" accept=".xlsx,.xls" multiple onChange={handleExcelImport} style={{display:"none"}} disabled={importing}/>
-            </label>
+            {userRole!=="viewer"&&(
+              <label style={{background:C.teal,color:"#fff",borderRadius:8,padding:"6px 14px",fontWeight:700,fontSize:12,cursor:importing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:6,opacity:importing?0.6:1}}>
+                <Download size={12}/>{importing?"Importing...":"📊 Import Excel"}
+                <input type="file" accept=".xlsx,.xls" multiple onChange={handleExcelImport} style={{display:"none"}} disabled={importing}/>
+              </label>
+            )}
             <button onClick={()=>setShowCumulative(p=>!p)}
               style={{background:showCumulative?C.gold+"33":C.bg,color:showCumulative?C.gold:C.sub,border:`1px solid ${showCumulative?C.gold:C.border}`,borderRadius:8,padding:"6px 14px",fontWeight:700,fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
               <TrendingUp size={13}/>📈 Cumulative Stats
@@ -5784,12 +5860,14 @@ const Resources = ({user,equipStatus=DEFAULT_EQUIP_STATUS,mpStatus=DEFAULT_MP_ST
           ))}
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-          <label style={{background:C.green,color:"#fff",borderRadius:8,padding:"6px 12px",fontWeight:700,fontSize:12,cursor:uploading?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5,opacity:uploading?0.6:1}}>
-            <Download size={12}/>{uploading?"Importing...":"📥 Import Excel"}
-            <input type="file" accept=".xlsx,.xls" onChange={e=>handleBulkImport(e,activeTab)} style={{display:"none"}} disabled={uploading}/>
-          </label>
+          {can(user,activeTab==="equipment"?"equipment":"manpower",user.site,"add")&&(
+            <label style={{background:C.green,color:"#fff",borderRadius:8,padding:"6px 12px",fontWeight:700,fontSize:12,cursor:uploading?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5,opacity:uploading?0.6:1}}>
+              <Download size={12}/>{uploading?"Importing...":"📥 Import Excel"}
+              <input type="file" accept=".xlsx,.xls" onChange={e=>handleBulkImport(e,activeTab)} style={{display:"none"}} disabled={uploading}/>
+            </label>
+          )}
           <Btn onClick={()=>exportCSV(activeTab==="equipment"?equipment:manpower,activeTab)} color={C.indigo}><Download size={13}/>CSV</Btn>
-          {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={activeTab==="equipment"?C.teal:C.purple}><Plus size={13}/>Add {activeTab==="equipment"?"Equipment":"Worker"}</Btn>}
+          {can(user,activeTab==="equipment"?"equipment":"manpower",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={activeTab==="equipment"?C.teal:C.purple}><Plus size={13}/>Add {activeTab==="equipment"?"Equipment":"Worker"}</Btn>}
         </div>
       </div>
 
@@ -7123,6 +7201,9 @@ const AppInner = () => {
             site:               neonUser.site  || "Site 1",
             avatar:             neonUser.avatar || (neonUser.name||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase(),
             permissions:        neonUser.permissions || DEFAULT_PERMISSIONS[neonUser.role||"viewer"],
+            // Scoped grants (Turn A backend, Turn B frontend). Safely default to []
+            // so this works even if the API response didn't include the field.
+            grants:             Array.isArray(neonUser.grants) ? neonUser.grants : [],
             mustChangePassword: neonUser.mustChangePassword || neonUser.must_change_password || false,
           };
           setUserProfile(profile);
@@ -7346,7 +7427,7 @@ const AppInner = () => {
     }
     return manualStats?.daysLTI||0;
   })();
-  const visibleNav=getSiteNavItems(userProfile.site, userProfile.role, userPerms);
+  const visibleNav=getSiteNavItems(userProfile.site, userProfile.role, userPerms, userProfile.grants);
   const sideWidth=isMobile?(sideOpen?240:0):(sideOpen?248:62);
   // Weekly digest reminder — true if never sent or 7+ days since last send
   const digestDaysSince = appLastSent
