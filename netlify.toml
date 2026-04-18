@@ -1,0 +1,45 @@
+# ── Build ─────────────────────────────────────────────────────────────────────
+[build]
+  command   = "npm run build"
+  publish   = "build"
+  functions = "netlify/functions"
+
+# ── Environment (set these in Netlify dashboard → Site → Environment vars) ────
+# DATABASE_URL  = postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require
+# JWT_SECRET    = any-long-random-string-you-choose
+
+# ── API redirects — /api/* → serverless function ──────────────────────────────
+[[redirects]]
+  from   = "/api/*"
+  to     = "/.netlify/functions/api/:splat"
+  status = 200
+
+# ── SPA fallback ──────────────────────────────────────────────────────────────
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
+
+# ── Security headers ──────────────────────────────────────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options              = "DENY"
+    X-Content-Type-Options       = "nosniff"
+    Referrer-Policy              = "strict-origin-when-cross-origin"
+    Permissions-Policy           = "camera=(), microphone=(), geolocation=()"
+    Strict-Transport-Security    = "max-age=31536000; includeSubDomains"
+    Content-Security-Policy      = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://i.ibb.co https://api.imgbb.com; connect-src 'self' https://api.imgbb.com https://*.neon.tech https://api.emailjs.com"
+
+[[headers]]
+  for = "/.netlify/functions/*"
+  [headers.values]
+    Access-Control-Allow-Origin  = "*"
+    Access-Control-Allow-Headers = "Content-Type, Authorization"
+
+# ── Functions config ──────────────────────────────────────────────────────────
+[functions]
+  node_bundler = "esbuild"
+
+[functions."api"]
+  included_files = ["netlify/functions/db.js"]
