@@ -678,3 +678,12 @@ exports.handler = async (event) => {
     return err("Internal server error", 500);
   }
 };
+
+// ── Test exports — unit tests require these helpers directly. Not part of the
+// public runtime surface; deliberately not documented for consumers.
+exports._test = {
+  hashPassword, verifyPassword, isLegacyHash, legacySha256,
+  signToken, verifyToken,
+  rateLimitKey, checkLoginRate, recordLoginFailure, clearLoginRate,
+  LOGIN_ATTEMPTS,
+};
