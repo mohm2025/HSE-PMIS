@@ -41,3 +41,11 @@ yarn-error.log*
 
 # Local Netlify folder
 .netlify
+
+# Claude Code working directory
+.claude/
+
+# Legacy Firebase → Neon migration artifacts (kept locally for disaster recovery,
+# but not committed: contains historical data + hardcoded default passwords + rotated API keys)
+scripts/legacy-migration/
+

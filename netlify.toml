@@ -29,7 +29,7 @@
     Referrer-Policy              = "strict-origin-when-cross-origin"
     Permissions-Policy           = "camera=(), microphone=(), geolocation=()"
     Strict-Transport-Security    = "max-age=31536000; includeSubDomains"
-    Content-Security-Policy      = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://i.ibb.co https://api.imgbb.com; connect-src 'self' https://api.imgbb.com https://*.neon.tech https://api.emailjs.com"
+    Content-Security-Policy      = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://i.ibb.co https://api.imgbb.com; connect-src 'self' https://api.imgbb.com https://*.neon.tech; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 
 [[headers]]
   for = "/.netlify/functions/*"

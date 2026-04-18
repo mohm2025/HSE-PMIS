@@ -1,15 +1,12 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback, createContext, useContext } from "react";
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { AlertTriangle, Eye, FileWarning, TrendingUp, Activity, Plus, X, CheckCircle2, Bell, Search, Menu, ArrowUp, ArrowDown, AlertOctagon, ClipboardList, BookOpen, Download, Trash2, LogOut, Sun, Moon, Users, Edit2, Save, Lock, UserCheck, Shield, Mail, Key } from "lucide-react";
-// ── EmailJS (bundled locally — no runtime CDN dependency) ────────────────────
-import emailjs from "@emailjs/browser";
+import { AlertTriangle, Eye, FileWarning, TrendingUp, Activity, Plus, X, CheckCircle2, Bell, Search, Menu, ArrowUp, ArrowDown, AlertOctagon, ClipboardList, BookOpen, Download, Trash2, LogOut, Sun, Moon, Users, Edit2, Save, Lock, UserCheck, Shield, Mail, Key, Home, ChevronRight } from "lucide-react";
 // ── Neon REST API — replaces Firebase SDK ─────────────────────────────────────
-import { neonAuth as auth, neonDb as db, neonCompat, refreshAllSnapshots } from "./neon-client";
+import { neonAuth as auth, neonDb as db, neonCompat } from "./neon-client";
 const { collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc,
         setDoc, query, where,
         signInWithEmailAndPassword, signOut, updatePassword,
-        sendPasswordResetEmail, createUserWithEmailAndPassword } = neonCompat;
-
+        sendPasswordResetEmail } = neonCompat;
 // ── THEMES ────────────────────────────────────────────────────────────────────
 const DARK  = {bg:"#0f172a",card:"#1e293b",border:"#334155",text:"#e2e8f0",sub:"#94a3b8",muted:"#64748b",red:"#ef4444",orange:"#f97316",yellow:"#eab308",green:"#22c55e",teal:"#14b8a6",blue:"#3b82f6",indigo:"#6366f1",purple:"#a855f7",pink:"#ec4899"};
 const LIGHT = {bg:"#f1f5f9",card:"#ffffff",border:"#e2e8f0",text:"#0f172a",sub:"#475569",muted:"#94a3b8",red:"#ef4444",orange:"#f97316",yellow:"#ca8a04",green:"#16a34a",teal:"#0d9488",blue:"#2563eb",indigo:"#4f46e5",purple:"#9333ea",pink:"#db2777"};
@@ -26,8 +23,8 @@ const ROLE_META = {
   viewer: {label:"View Only",    color:"#3b82f6",icon:Eye,   canAdd:false,canEdit:false,canDelete:false,canManageUsers:false},
 };
 const NAV = [
-  // ── Home dashboard (admin / All Sites only) — executive landing page ──────
-  {id:"overview",     label:"🏠 Home Dashboard",   icon:Activity,   color:"#14b8a6", siteAccess:"All Sites"},
+  // ── Master overview (admin / All Sites only) ──────────────────────────────
+  {id:"overview",     label:"All Sites Overview", icon:Activity,   color:"#14b8a6", siteAccess:"All Sites"},
   // ── Site dashboards — each is a full HSSE hub filtered to that site ───────
   {id:"site1",        label:"Palm1 Al-Ahsa",      icon:Activity,   color:"#14b8a6", siteAccess:"Site 1"},
   {id:"site2",        label:"Palm2 Al-Madinah",   icon:Activity,   color:"#8b5cf6", siteAccess:"Site 2"},
@@ -40,29 +37,19 @@ const NAV = [
   {id:"dropdowns",    label:"Dropdown Settings",  icon:Edit2,      color:"#0d9488", adminOnly:true},
 ];
 // Site-specific permissions: which nav items a user can see based on their assigned site
-// and their grants. A viewer with a grant for Site 2 can now see Site 2 in nav.
-const getSiteNavItems = (userSite, userRole, userPerms, grants = []) => {
-  // Sites where the user has ANY grant — these should show in nav even for viewers
-  const grantedSites = new Set(
-    (Array.isArray(grants) ? grants : [])
-      .filter(g => g && g.site && Array.isArray(g.actions) && g.actions.length > 0)
-      .map(g => g.site)
-  );
+// eslint-disable-next-line no-unused-vars
+const getSiteNavItems = (userSite, userRole, userPerms) => {
   return NAV.filter(n=>{
     // Admin sees everything
     if(userRole==="admin") return true;
     // adminOnly items — check explicit permissions
     if(n.adminOnly) return userPerms.includes(n.id);
-    // siteAccess items — show if user's site matches, user has All Sites,
-    // user has explicit permission, OR user has a grant for that site
+    // siteAccess items — show if user's site matches OR user has All Sites
     if(n.siteAccess){
       if(n.siteAccess==="All Sites") return userSite==="All Sites";
-      if(userSite==="All Sites" || userSite===n.siteAccess) return true;
-      if(userPerms.includes(n.id)) return true;
-      if(grantedSites.has(n.siteAccess) || grantedSites.has("All Sites")) return true;
-      return false;
+      return userSite==="All Sites" || userSite===n.siteAccess || userPerms.includes(n.id);
     }
-    // General items (e.g. "resources") — show to all logged-in users
+    // General items — show to all
     return true;
   });
 };
@@ -70,65 +57,6 @@ const DEFAULT_PERMISSIONS = {
   admin:  ["overview","site1","site2","site3","resources","notifications","users","dropdowns"],
   editor: ["resources"],
   viewer: ["resources"],
-};
-
-// ── SCOPED-GRANTS PERMISSION CHECK ────────────────────────────────────────────
-// Mirror of the backend's canDo(). The UI uses this to hide buttons the user
-// can't use (cosmetic + UX only — the backend enforces the real thing).
-//
-// Signature: can(user, section, site, action, record?)
-//   user    — userProfile object ({ role, site, grants, uid, ... })
-//   section — "observations" | "ncr" | "incidents" | "risks" | "equipment" | "manpower" | "weekly_reports"
-//   site    — "Site 1" | "Site 2" | "Site 3" | "" (for site-less sections)
-//   action  — "add" | "edit_own" | "edit_any" | "delete"
-//   record  — optional record object { created_by, site } — required for edit_own
-//
-// Rules (kept identical to netlify/functions/api.js canDo):
-//   • admin always wins
-//   • users/settings/dropdowns sections are admin-only (never grantable)
-//   • viewer must have an explicit matching grant
-//   • editor with NO grants keeps legacy blanket add/edit_any on accessible sites
-//   • editor WITH grants — grants become the sole source of truth
-const canAccessSiteClient = (user, site) => {
-  if(!user) return false;
-  if(user.role === "admin") return true;
-  if(user.site === "All Sites") return true;
-  if(!site) return true;
-  return user.site === site;
-};
-const can = (user, section, site, action, record = null) => {
-  if(!user) return false;
-  if(user.role === "admin") return true;
-  if(["users","settings","dropdowns"].includes(section)) return false;
-  if(!canAccessSiteClient(user, site)) return false;
-  const grants = Array.isArray(user.grants) ? user.grants : [];
-  const matching = grants.filter(g =>
-    g && g.section === section &&
-    (g.site === site || g.site === "All Sites") &&
-    Array.isArray(g.actions)
-  );
-  if(action === "edit_own") {
-    if(!record || !record.created_by) return false;
-    if(record.created_by !== user.uid) return false;
-    return matching.some(g => g.actions.includes("edit_own"));
-  }
-  if(matching.some(g => g.actions.includes(action))) return true;
-  // Legacy fallback: editor without ANY grants keeps old blanket behavior
-  if(user.role === "editor" && grants.length === 0) {
-    return ["add","edit_any"].includes(action);
-  }
-  return false;
-};
-// Convenience: can user do `action` on `section` at ANY accessible site?
-// Used for bulk operations (CSV export, import) where the button isn't tied
-// to a specific site.
-const canAnySite = (user, section, action) => {
-  if(!user) return false;
-  if(user.role === "admin") return true;
-  if(user.site === "All Sites") {
-    return ["Site 1","Site 2","Site 3"].some(s => can(user, section, s, action));
-  }
-  return can(user, section, user.site, action);
 };
 const DEFAULT_ZONES        = ["Zone A","Zone B","Zone C","Warehouse","Office","Tank Farm","Panel Room","Site Gate","Parking","Canteen"];
 const DEFAULT_OBS_TYPES    = ["Unsafe Act","Unsafe Condition","Near Miss","Good Practice","Environmental","Security"];
@@ -142,47 +70,50 @@ const DEFAULT_RISK_STATUS  = ["Active","Under Review","Closed"];
 const DEFAULT_EQUIP_STATUS = ["Active","Under Maintenance","Out of Service","Mobilizing","Demobilized"];
 const DEFAULT_MP_STATUS    = ["Active","On Leave","Terminated","Demobilized"];
 // ── SITES ─────────────────────────────────────────────────────────────────────
+// ── PROJECT CONFIGURATION ─────────────────────────────────────────────────────
+// HOW TO ADD A NEW PROJECT: Add one object to this array. That's it.
+// All pages, KPIs, charts, and data loading auto-configure.
 const SITES = [
-  { id:"Site 1", prefix:"01", name:"Palm1 Al-Ahsa Project"    },
-  { id:"Site 2", prefix:"02", name:"Palm2 Al-Madinah Project"  },
-  { id:"Site 3", prefix:"03", name:"Site 3"                    },
+  {
+    id:"Site 1", key:"site1", prefix:"01",
+    name:"Palm1 Al-Ahsa Project", shortName:"Palm1",
+    color:"#14b8a6", contractor:"Al-Tamimi Contracting",
+    consultant:"Khatib & Alami", location:"Al-Ahsa, Saudi Arabia",
+    kpiConfig:{ trirTarget:0.5, ltirTarget:0.2, nearMissTarget:20, obsTarget:280, trainingTarget:95, welfareTarget:85 },
+  },
+  {
+    id:"Site 2", key:"site2", prefix:"02",
+    name:"Palm2 Al-Madinah Project", shortName:"Palm2",
+    color:"#8b5cf6", contractor:"Al-Tamimi Contracting",
+    consultant:"Khatib & Alami", location:"Al-Madinah, Saudi Arabia",
+    kpiConfig:{ trirTarget:0.5, ltirTarget:0.2, nearMissTarget:20, obsTarget:280, trainingTarget:95, welfareTarget:85 },
+  },
+  {
+    id:"Site 3", key:"site3", prefix:"03",
+    name:"Site 3", shortName:"Site 3",
+    color:"#f97316", contractor:"", consultant:"", location:"",
+    kpiConfig:{ trirTarget:0.5, ltirTarget:0.2, nearMissTarget:20, obsTarget:280, trainingTarget:95, welfareTarget:85 },
+  },
 ];
-const SITE_IDS    = SITES.map(s=>s.id);
-const sitePrefix  = (siteId) => (SITES.find(s=>s.id===siteId)||SITES[0]).prefix;
-const siteName    = (siteId) => (SITES.find(s=>s.id===siteId)||SITES[0]).name;
+const SITE_IDS   = SITES.map(s=>s.id);
+const siteById   = (id) => SITES.find(s=>s.id===id)||SITES[0];
+const sitePrefix = (id) => siteById(id).prefix;
+const siteName   = (id) => siteById(id).name;
+// eslint-disable-next-line no-unused-vars
+const siteColor  = (id) => siteById(id).color;
 
 const INIT_MANUAL_STATS = {daysLTI:142,manpower:518,manhoursWeek:31140,manhoursMonth:237108,manhoursYear:402248,manhoursProject:1830112,safetyOfficers:12,firstAiders:10,tbtAttendees:2295};
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const buildDefaultMonthlyState = () => ({
+  welfare: DEFAULT_WELFARE_ITEMS,
+  summary: {welfare:"87%", training:"94%"},
+  trend:   DEFAULT_MONTHLY_TREND,
+  kpiItems: INIT_KPI_ITEMS,
+  pciItems: INIT_PCI_ITEMS,
+  kpiTable: buildDefaultKpiTable(INIT_KPI_ITEMS),
+  pciTable: buildDefaultKpiTable(INIT_PCI_ITEMS),
+});
 const KPI_COLORS_PALETTE = ["#14b8a6","#ef4444","#f97316","#3b82f6","#6366f1","#a855f7","#ec4899","#eab308","#22c55e","#64748b","#06b6d4","#f43f5e","#84cc16","#fb923c","#818cf8"];
-
-// ── MANUAL-STAT FIELD DEFINITIONS ────────────────────────────────────────────
-// The "Edit Stats" form in Overview and each SiteDashboard used to duplicate
-// this list; same for the "Project Statistics" read-only tile grid. Now both
-// components share these definitions. Keep `key` in sync with INIT_MANUAL_STATS.
-// The tile/label color is read via C[colorKey] at render time so themes work.
-const MANUAL_STAT_FIELDS = [
-  {key:"daysLTI",         label:"Days Without LTI"},
-  {key:"manpower",        label:"Manpower"},
-  {key:"manhoursWeek",    label:"Man-hours (Week)"},
-  {key:"manhoursMonth",   label:"Man-hours (Month)"},
-  {key:"manhoursYear",    label:"Man-hours (Year)"},
-  {key:"manhoursProject", label:"Man-hours (Project)"},
-  {key:"safetyOfficers",  label:"Safety Officers"},
-  {key:"firstAiders",     label:"First Aiders"},
-  {key:"tbtAttendees",    label:"TBT Attendees"},
-];
-// Project Statistics tile config — `format` says whether to .toLocaleString()
-// the value (for counts with thousands separators) or leave it plain.
-const PROJECT_STAT_TILES = [
-  {key:"manpower",        label:"👷 Manpower",             colorKey:"purple", format:"n"},
-  {key:"manhoursWeek",    label:"⏱ Man-hours (Week)",      colorKey:"teal",   format:"n"},
-  {key:"manhoursMonth",   label:"📅 Man-hours (Month)",    colorKey:"blue",   format:"n"},
-  {key:"manhoursYear",    label:"📆 Man-hours (Year)",     colorKey:"indigo", format:"n"},
-  {key:"manhoursProject", label:"🏗 Man-hours (Project)",  colorKey:"green",  format:"n"},
-  {key:"safetyOfficers",  label:"👮 Safety Officers",      colorKey:"blue",   format:"raw"},
-  {key:"firstAiders",     label:"🏥 First Aiders",         colorKey:"orange", format:"raw"},
-  {key:"tbtAttendees",    label:"📢 TBT Attendees",        colorKey:"teal",   format:"n"},
-];
 
 // ── STATIC DEFAULTS (used only if Firestore has no saved data) ────────────────
 const DEFAULT_KPI_DATA = [
@@ -292,13 +223,7 @@ const fbAdd   = async (col,data) => {
   // Remove undefined values — Firestore rejects them
   Object.keys(clean).forEach(k=>clean[k]===undefined && delete clean[k]);
   try{ await addDoc(collection(db,col),clean); }
-  catch(e){
-    // Surface the failure — silent catches were making saves appear to succeed
-    // while the record never landed in Neon (auth expiry, CSP, 4xx, etc.).
-    console.error(`[HSSE] fbAdd(${col}) failed:`,e);
-    try{ window.alert(`⚠️ Save failed for ${col}: ${e?.message||"Unknown error"}.\nPlease check your connection and try again. If the issue persists, log out and back in.`); }catch{}
-    throw e;
-  }
+  catch(e){ console.error(`[HSSE] fbAdd(${col}) failed:`,e); throw e; }
 };
 const fbDel   = async (col,item) => {
   if(!item?._docId){ console.warn("[HSSE] fbDel: missing _docId for",col); return; }
@@ -502,100 +427,6 @@ const SavingBadge = ({saving,C}) => saving?(
   </span>
 ):null;
 
-// ── SHARED PRIMITIVES — replace inlined style blocks across the app ──────────
-// Card: standard card wrapper used by almost every panel. `accent` tints the
-// border (e.g. edit panels use C.blue+"44"); `pad` overrides default padding.
-const Card = ({C,accent,pad=18,style={},children,...p}) => (
-  <div {...p} style={{background:C.card,border:`1px solid ${accent||C.border}`,borderRadius:14,padding:pad,...style}}>
-    {children}
-  </div>
-);
-// SectionTitle: the standard <h3> used at the top of every panel.
-const SectionTitle = ({C,children,style={}}) => (
-  <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14,...style}}>{children}</h3>
-);
-// Shared Recharts tooltip style — matches the card look in every chart.
-const chartTooltip = (C) => ({background:C.card,border:`1px solid ${C.border}`,borderRadius:8});
-// StatPill: the small colored tile used by NCR counts, Observation counts,
-// Alert summary strips. The "22" alpha on bg + "44" on border is the standard.
-const StatPill = ({label,value,color,C}) => (
-  <div style={{background:color+"22",border:`1px solid ${color}44`,borderRadius:10,padding:14,textAlign:"center"}}>
-    <div style={{color,fontSize:22,fontWeight:900}}>{value}</div>
-    <div style={{color:C.sub,fontSize:11}}>{label}</div>
-  </div>
-);
-// PillGrid: the auto-fit grid wrapper around StatPills (lets callers skip the
-// wrapping <div style={{display:"grid",...}}/>).
-const PillGrid = ({minWidth=130,gap=10,children}) => (
-  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fit,minmax(${minWidth}px,1fr))`,gap}}>{children}</div>
-);
-
-// ── ManualStatsEditor: the "Edit Manual Stats" number-input grid ─────────────
-// Shared between Overview and SiteDashboard. Renders 9 number inputs driven by
-// MANUAL_STAT_FIELDS so both call sites stay in lockstep.
-const ManualStatsEditor = ({draft,setDraft,C,minWidth=200}) => (
-  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fit,minmax(${minWidth}px,1fr))`,gap:12}}>
-    {MANUAL_STAT_FIELDS.map(({key,label})=>(
-      <Field key={key} label={label} C={C}>
-        <Inp C={C} type="number" value={draft[key]||0}
-          onChange={e=>setDraft(p=>({...p,[key]:Number(e.target.value)}))}/>
-      </Field>
-    ))}
-  </div>
-);
-// ── ProjectStatsGrid: the read-only "Project Statistics" tile row ────────────
-// Shared between Overview and SiteDashboard. Values pulled from a manualStats
-// object by key; colors resolved via C[colorKey] for theme-awareness.
-const ProjectStatsGrid = ({stats,C,minWidth=190}) => (
-  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fit,minmax(${minWidth}px,1fr))`,gap:10}}>
-    {PROJECT_STAT_TILES.map(({key,label,colorKey,format})=>{
-      const c = C[colorKey] || C.muted;
-      const raw = stats?.[key] || 0;
-      const v = format==="n" ? raw.toLocaleString() : raw;
-      return (
-        <div key={key} style={{background:c+"11",border:`1px solid ${c}33`,borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{color:C.sub,fontSize:12}}>{label}</span>
-          <span style={{color:c,fontWeight:800,fontSize:15}}>{v}</span>
-        </div>
-      );
-    })}
-  </div>
-);
-
-// ── DATE HELPERS — shared between Overview, KPITrendChart, etc. ──────────────
-// Builds a list of the last N months (default 6) as {yr, mo, label} so each
-// consumer can run its own filter over observations/NCRs/incidents without
-// re-implementing the Date math. The returned items expose an `inMonth(dateStr)`
-// predicate that safely handles null, empty, and invalid date inputs.
-const buildMonthWindow = (n=6) => {
-  const months = [];
-  for(let i=n-1; i>=0; i--){
-    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()-i);
-    const yr = d.getFullYear(), mo = d.getMonth();
-    const label = d.toLocaleString("default",{month:"short"});
-    months.push({
-      yr, mo, label, month: label,
-      inMonth: (dateStr) => {
-        if(!dateStr) return false;
-        const p = new Date(dateStr);
-        return !isNaN(p) && p.getFullYear()===yr && p.getMonth()===mo;
-      },
-    });
-  }
-  return months;
-};
-
-// ── DATA HELPERS — per-site filters used by Overview + SiteDashboard ─────────
-const bySite = (rows, siteId) => (rows||[]).filter(r => r.site === siteId);
-// Today's date in YYYY-MM-DD — was inlined as 5+ variants of new Date()+padStart
-const todayStr = () => {
-  const n = new Date();
-  return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
-};
-const nowTimeStr = () => {
-  const n = new Date();
-  return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
-};
 
 // ── KPI TREND CHART — live from Firebase obs, ncr, incidents ─────────────────
 // Builds 6-month rolling window from actual Firestore records.
@@ -606,31 +437,67 @@ const nowTimeStr = () => {
 // IMPORTANT: incidents and observations are SEPARATE collections.
 // The chart never substitutes observations for incidents — 0 is shown as 0.
 const KPITrendChart = ({obs, ncr, incidents, C}) => {
-  const trendData = useMemo(()=>buildMonthWindow(6).map(m=>{
-    const monthObs = obs.filter(o=>m.inMonth(o.date));
-    const monthNcr = ncr.filter(n=>m.inMonth(n.date||n.created_at));
-    const monthIncidents = (incidents||[]).filter(inc=>m.inMonth(inc.date));
-    const damCode = (inc) => (inc.damInjEnv||"").toUpperCase().trim();
-    return {
-      month:        m.label,
-      observations: monthObs.length,
-      nearMiss:     monthObs.filter(o=>o.type==="Near Miss").length,
-      incidents:    monthIncidents.length,
-      injuries:     monthIncidents.filter(inc=>["INJ","FAC","MTC","LTI","RWC"].includes(damCode(inc))).length,
-      mva:          monthIncidents.filter(inc=>damCode(inc)==="MVA").length,
-      ncrOpen:      monthNcr.filter(n=>n.status!=="Closed").length,
-      positiveObs:  monthObs.filter(o=>o.type==="Good Practice").length,
-    };
-  }),[obs, ncr, incidents]);
+  const trendData = useMemo(()=>{
+    const months = [];
+    for(let i=5; i>=0; i--){
+      const d = new Date();
+      d.setDate(1);
+      d.setMonth(d.getMonth() - i);
+      const yr  = d.getFullYear();
+      const mo  = d.getMonth();
+      const lbl = d.toLocaleString("default",{month:"short"});
 
-  const hasObs = obs.length > 0;
-  const hasInc = (incidents||[]).length > 0;
-  const hasNcr = ncr.length > 0;
+      const inMonth = (dateStr) => {
+        if(!dateStr) return false;
+        const p = new Date(dateStr);
+        return !isNaN(p) && p.getFullYear()===yr && p.getMonth()===mo;
+      };
+
+      // ── Observations (from obs collection) ────────────────────────────────
+      const monthObs = obs.filter(o=>inMonth(o.date));
+      const monthNcr = ncr.filter(n=>inMonth(n.date||n.created_at));
+
+      // ── Incidents (from incidents register collection only) ────────────────
+      // NEVER fall back to observations — if register is empty, show 0
+      const monthIncidents = (incidents||[]).filter(inc=>inMonth(inc.date));
+      const totalInc  = monthIncidents.length;
+      const injuries  = monthIncidents.filter(inc=>
+        ["INJ","FAC","MTC","LTI","RWC"].includes((inc.damInjEnv||"").toUpperCase().trim())
+      ).length;
+      const mvaCount  = monthIncidents.filter(inc=>
+        (inc.damInjEnv||"").toUpperCase().trim()==="MVA"
+      ).length;
+
+      months.push({
+        month:        lbl,
+        // Observations — count of logged obs records
+        observations: monthObs.length,
+        // Near Miss — obs typed as Near Miss
+        nearMiss:     monthObs.filter(o=>o.type==="Near Miss").length,
+        // Incidents — count from incident register ONLY (0 if register empty)
+        incidents:    totalInc,
+        // Injury sub-type from register
+        injuries,
+        // MVA sub-type from register
+        mva:          mvaCount,
+        // Open NCRs this month
+        ncrOpen:      monthNcr.filter(n=>n.status!=="Closed").length,
+        // Positive obs
+        positiveObs:  monthObs.filter(o=>o.type==="Good Practice").length,
+      });
+    }
+    return months;
+  },[obs, ncr, incidents]);
+
+  // Show live indicator only when the relevant collection has data
+  const hasObs      = obs.length > 0;
+  const hasInc      = (incidents||[]).length > 0;
+  const hasNcr      = ncr.length > 0;
 
   return(
-    <Card C={C}>
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
-        <SectionTitle C={C} style={{margin:0}}>6-Month KPI Trend</SectionTitle>
+        <h3 style={{color:C.text,fontWeight:700,margin:0,fontSize:14}}>6-Month KPI Trend</h3>
         <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
           {[["Obs",hasObs,C.teal],["Incidents",hasInc,C.red],["NCR",hasNcr,C.indigo]].map(([lbl,active,col])=>(
             <div key={lbl} style={{display:"flex",alignItems:"center",gap:4}}>
@@ -645,7 +512,10 @@ const KPITrendChart = ({obs, ncr, incidents, C}) => {
           <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
           <XAxis dataKey="month" tick={{fill:C.muted,fontSize:11}}/>
           <YAxis tick={{fill:C.muted,fontSize:11}} allowDecimals={false}/>
-          <Tooltip contentStyle={chartTooltip(C)} formatter={(value, name) => [value, name]}/>
+          <Tooltip
+            contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}
+            formatter={(value, name) => [value, name]}
+          />
           <Legend/>
           <Line type="monotone" dataKey="observations" name="Observations" stroke={C.teal}   strokeWidth={2} dot={{r:3}}/>
           <Line type="monotone" dataKey="incidents"    name="Incidents"    stroke={C.red}    strokeWidth={2} dot={{r:3}}/>
@@ -658,7 +528,7 @@ const KPITrendChart = ({obs, ncr, incidents, C}) => {
           ⚠️ Incident register is empty — log incidents via the Weekly → Incident Register section to populate this chart.
         </div>
       )}
-    </Card>
+    </div>
   );
 };
 
@@ -863,7 +733,7 @@ const KPIDashboard = ({userRole,kpis,setKpis,radarData,setRadarData,obs=[],ncr=[
             <PolarAngleAxis dataKey="subject" tick={{fill:C.sub,fontSize:11}}/>
             <PolarRadiusAxis domain={[0,100]} tick={{fill:C.muted,fontSize:10}}/>
             <Radar name="Score" dataKey="A" stroke={C.teal} fill={C.teal} fillOpacity={0.3}/>
-            <Tooltip contentStyle={chartTooltip(C)}/>
+            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
           </RadarChart>
         </ResponsiveContainer>
       </div>
@@ -1121,8 +991,9 @@ const ObsDetail = ({obs,onClose,C}) => (
 
 // ── OBS FORM ──────────────────────────────────────────────────────────────────
 const ObsForm = ({user,zones,obsTypes,actionsList,obsSeverity,obsCount,onSubmit,onClose,C}) => {
-  const today   = todayStr();
-  const nowTime = nowTimeStr();
+  const _of=new Date();
+  const today=`${_of.getFullYear()}-${String(_of.getMonth()+1).padStart(2,"0")}-${String(_of.getDate()).padStart(2,"0")}`;
+  const nowTime=`${String(_of.getHours()).padStart(2,"0")}:${String(_of.getMinutes()).padStart(2,"0")}`;
   const defaultSite=user.site==="All Sites"?"Site 1":user.site;
   const [form,setForm]=useState({date:today,time:nowTime,area:zones[0]||"",type:obsTypes[0]||"",severity:(obsSeverity||DEFAULT_OBS_SEVERITY)[0]||"High",action:actionsList[0]||"",status:"Open",desc:"",site:defaultSite});
   // ID is computed from current site so it updates when user changes site
@@ -1185,15 +1056,9 @@ const ObsForm = ({user,zones,obsTypes,actionsList,obsSeverity,obsCount,onSubmit,
     setUploading(true);
     try{
       let photoUrl=null;if(photo)photoUrl=await uploadPhoto(photo);
-      // Await onSubmit so that if fbAdd throws, we keep the modal open and
-      // don't misleadingly close it after a silent persistence failure.
-      await onSubmit({...form,id:newId,seqNum:obsCount+1,observer:user.name,observerId:user.uid,openPhoto:photoUrl||"",closePhoto:"",closeDate:"",closeTime:""});
+      onSubmit({...form,id:newId,seqNum:obsCount+1,observer:user.name,observerId:user.uid,openPhoto:photoUrl||"",closePhoto:"",closeDate:"",closeTime:""});
       onClose();
-    }catch(e){
-      console.error(e);
-      // fbAdd already surfaced an alert; leave the modal open so the user
-      // can retry without re-entering data.
-    }finally{setUploading(false);}
+    }catch(e){console.error(e);}finally{setUploading(false);}
   };
 
   return(
@@ -1269,7 +1134,10 @@ const ObsForm = ({user,zones,obsTypes,actionsList,obsSeverity,obsCount,onSubmit,
 
 // ── CLOSEOUT MODAL ────────────────────────────────────────────────────────────
 const CloseoutModal = ({obs,onClose,C}) => {
-  const [closeDate,setCloseDate]=useState(todayStr()),[closeTime,setCloseTime]=useState(nowTimeStr());
+  const _cn=new Date();
+  const today=`${_cn.getFullYear()}-${String(_cn.getMonth()+1).padStart(2,"0")}-${String(_cn.getDate()).padStart(2,"0")}`;
+  const nowTime=`${String(_cn.getHours()).padStart(2,"0")}:${String(_cn.getMinutes()).padStart(2,"0")}`;
+  const [closeDate,setCloseDate]=useState(today),[closeTime,setCloseTime]=useState(nowTime);
   const [photo,setPhoto]=useState(null),[preview,setPreview]=useState(obs.closePhoto||null),[uploading,setUploading]=useState(false);
   const handlePhoto=e=>{const f=e.target.files[0];if(!f)return;setPhoto(f);setPreview(URL.createObjectURL(f));};
   const save=async()=>{
@@ -1278,10 +1146,7 @@ const CloseoutModal = ({obs,onClose,C}) => {
       let url=obs.closePhoto||"";if(photo)url=await uploadPhoto(photo);
       await updateDoc(doc(db,"observations",obs._docId),{status:"Closed",closeDate,closeTime,closePhoto:url});
       onClose();
-    }catch(e){
-      console.error(e);
-      try{ window.alert(`⚠️ Close-out did not save: ${e?.message||"Unknown error"}`); }catch{}
-    }finally{setUploading(false);}
+    }catch(e){console.error(e);}finally{setUploading(false);}
   };
   return(
     <Modal title="✅ Close Out Observation" onClose={onClose} C={C}>
@@ -1521,8 +1386,9 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
     if(failed>0) alert(`⚠️ ${failed} record(s) could not be deleted. Check your permissions.`);
   };
   const bulkClose=async()=>{
-    const d = todayStr();
-    const t = nowTimeStr();
+    const _n=new Date();
+    const d=`${_n.getFullYear()}-${String(_n.getMonth()+1).padStart(2,"0")}-${String(_n.getDate()).padStart(2,"0")}`;
+    const t=`${String(_n.getHours()).padStart(2,"0")}:${String(_n.getMinutes()).padStart(2,"0")}`;
     let failed=0;
     for(const id of selected){
       const o=obs.find(x=>x._docId===id);
@@ -1695,11 +1561,13 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
         />
       )}
 
-      <PillGrid minWidth={110}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:10}}>
         {[["Total",counts.all,C.blue],["Open",counts.open,C.red],["High Risk",counts.high,C.orange],["Good Practice",counts.positive,C.green]].map(([l,v,c])=>(
-          <StatPill key={l} label={l} value={v} color={c} C={C}/>
+          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
+            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div><div style={{color:"#94a3b8",fontSize:11}}>{l}</div>
+          </div>
         ))}
-      </PillGrid>
+      </div>
 
       {/* ── Row 1: search + dropdowns + action buttons ── */}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -1719,19 +1587,15 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
             {opts.map(o=><option key={o} value={o}>{lbl?lbl(o):o}</option>)}
           </select>
         ))}
-        {can(user,"observations",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={C.teal}><Plus size={14}/>New</Btn>}
-        {/* Excel Import Button — needs 'add' to be useful since import inserts records */}
-        {can(user,"observations",user.site,"add")&&(
+        {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.teal}><Plus size={14}/>New</Btn>}
+        {/* Excel Import Button */}
+        {role.canAdd&&(
           <label style={{background:C.indigo,color:"#fff",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}} title="Select one or more Daily Observation Report Excel files to import">
             📥 Import Historical
             <input type="file" accept=".xlsx,.xls" multiple onChange={handleExcelUpload} style={{display:"none"}}/>
           </label>
         )}
-        {/* Bulk Import — same permission as Import Historical (inserts records) */}
-        {can(user,"observations",user.site,"add")&&(
-          <Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>
-        )}
-        {/* CSV export stays available to anyone who can see the data */}
+        <Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>
         <Btn onClick={()=>exportCSV(obs,"observations")} color={C.indigo}><Download size={14}/>CSV</Btn>
       </div>
 
@@ -1760,7 +1624,7 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
       </div>
 
       {/* Import hints */}
-      {can(user,"observations",user.site,"add")&&(
+      {role.canAdd&&(
         <div style={{background:C.indigo+"11",border:`1px solid ${C.indigo}33`,borderRadius:10,padding:"9px 14px",fontSize:12,color:C.indigo,display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontSize:15}}>📥</span>
           <span>Use <strong>📥 Import Historical</strong> to upload one or <strong>multiple</strong> past Daily Observation Report Excel files at once. The system reads Sheet1 from each file, sorts all records by date, skips duplicates automatically, and marks imported records with a <strong>📥 Historical</strong> badge.</span>
@@ -1860,20 +1724,37 @@ const Observations = ({user,obs,zones,obsTypes,actionsList,obsSeverity=DEFAULT_O
   );
 };
 
-// ── HOME DASHBOARD ────────────────────────────────────────────────────────────
-// Executive landing page: hero cards for each site + comparison charts + global KPIs.
-// Each hero card is clickable and navigates to that site's dedicated page.
-const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,userRole,kpis,computedDaysLTI,manpower=[],equipment=[],setActive,C}) => {
+// ── OVERVIEW ──────────────────────────────────────────────────────────────────
+// eslint-disable-next-line no-unused-vars
+const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,userRole,kpis,computedDaysLTI,C}) => {
   // ── Compute live 6-month trend from actual observation + NCR data ─────────
-  const liveTrend = buildMonthWindow(6).map(m => ({
-    month:        m.label,
-    observations: obs.filter(o => m.inMonth(o.date)).length,
-    // Incidents come from the incidents register collection ONLY — never obs proxy
-    incidents:    (incidents||[]).filter(i => m.inMonth(i.date)).length,
-    nearMiss:     obs.filter(o => m.inMonth(o.date) && o.type==="Near Miss").length,
-    ncrOpen:      ncr.filter(n => m.inMonth(n.date) && n.status!=="Closed").length,
-    welfare:      87,
-  }));
+  const liveTrend = (() => {
+    const months = [];
+    for(let i=5; i>=0; i--){
+      const d  = new Date();
+      d.setDate(1);
+      d.setMonth(d.getMonth() - i);
+      const yr = d.getFullYear();
+      const mo = d.getMonth();
+      const label = d.toLocaleString("default",{month:"short"});
+      const inMonth = (dateStr) => {
+        if(!dateStr) return false;
+        const pd = new Date(dateStr);
+        return !isNaN(pd) && pd.getFullYear()===yr && pd.getMonth()===mo;
+      };
+      // incidents from the incidents register collection ONLY — never obs proxy
+      const monthInc = (incidents||[]).filter(inc=>inMonth(inc.date));
+      months.push({
+        month:        label,
+        observations: obs.filter(o=>inMonth(o.date)).length,
+        incidents:    monthInc.length,
+        nearMiss:     obs.filter(o=>inMonth(o.date)&&o.type==="Near Miss").length,
+        ncrOpen:      ncr.filter(n=>inMonth(n.date)&&n.status!=="Closed").length,
+        welfare:      87,
+      });
+    }
+    return months;
+  })();
   const [editStats,setEditStats]=useState(false),[draft,setDraft]=useState(manualStats),[saving,setSaving]=useState(false);
   // FIX: sync draft when Firestore data loads in after mount
   useEffect(()=>{ if(!editStats) setDraft(manualStats); },[manualStats, editStats]);
@@ -1882,186 +1763,42 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
     await saveSettings({manualStats:draft});
     setSaving(false);setEditStats(false);
   };
-
-  // ── Lag fix: manual Refresh + auto-refresh on tab visibility/focus ─────────
-  // Previously users reported the Overview felt stale when returning from
-  // another tab or after leaving it open. The 15-second polling tick could
-  // leave the numbers frozen for up to a full interval. Now:
-  //  • Clicking Refresh forces every listener to re-poll immediately.
-  //  • Returning to this tab (visibilitychange → visible) triggers the same.
-  //  • Window focus also triggers it (covers multi-window setups).
-  // A "Last refreshed" timestamp makes the freshness visible to the user.
-  const [lastRefreshed,setLastRefreshed]=useState(new Date());
-  const [refreshing,setRefreshing]=useState(false);
-  const doRefresh=useCallback(async()=>{
-    setRefreshing(true);
-    try{ await refreshAllSnapshots(); }
-    catch(e){ console.warn("[Overview] refresh failed:",e); }
-    setLastRefreshed(new Date());
-    // Keep the spin visible at least 600ms so the click feels responsive
-    setTimeout(()=>setRefreshing(false),600);
-  },[]);
-  useEffect(()=>{
-    const onVis=()=>{ if(document.visibilityState==="visible") doRefresh(); };
-    const onFocus=()=>doRefresh();
-    document.addEventListener("visibilitychange",onVis);
-    window.addEventListener("focus",onFocus);
-    return()=>{
-      document.removeEventListener("visibilitychange",onVis);
-      window.removeEventListener("focus",onFocus);
-    };
-  },[doRefresh]);
-  // ── Hero site cards — Option B: 8 metrics per site, one unified view ──────
-  // This replaces the previous "3-metric hero + duplicated Per-Project
-  // Breakdown" layout. Each site now owns all of its key numbers in one
-  // place — no more hunting across two sections that showed the same data.
-  const siteHeroes = [
-    {id:"Site 1", navId:"site1", label:"Palm1 Al-Ahsa Project",      short:"Palm1", accent:C.teal,   grad:"linear-gradient(135deg,#0f4c3a,#065f46)"},
-    {id:"Site 2", navId:"site2", label:"Palm2 Al-Madinah Project",   short:"Palm2", accent:C.purple, grad:"linear-gradient(135deg,#4c1d95,#5b21b6)"},
-    {id:"Site 3", navId:"site3", label:"Site 3",                     short:"Site 3",accent:C.orange, grad:"linear-gradient(135deg,#7c2d12,#9a3412)"},
-  ].map(s => {
-    const sObs = bySite(obs, s.id);
-    const sNcr = bySite(ncr, s.id);
-    const sMp  = bySite(manpower, s.id);
-    const sInc = bySite(incidents, s.id);
-    // Per-site Days-LTI override (if present in manualStats), else global value
-    const perSite = manualStats?.perSite?.[s.id] || {};
-    return {
-      ...s,
-      daysLTI:     perSite.daysLTI ?? (computedDaysLTI ?? manualStats?.daysLTI ?? 0),
-      mhWeek:      perSite.manhoursWeek ?? manualStats?.manhoursWeek ?? 0,
-      openObs:     sObs.filter(o=>o.status==="Open").length,
-      criticalNcr: sNcr.filter(n=>n.severity==="Critical").length,
-      nearMiss:    sObs.filter(o=>o.type==="Near Miss").length,
-      totalObs:    sObs.length,
-      totalNcr:    sNcr.length,
-      mp:          sMp.length,
-      inc:         sInc.length,
-    };
-  });
-  // ── Comparison chart data: observations / NCR / near-miss per site ─────────
-  const siteCompare = siteHeroes.map(s => ({
-    site:         s.short,
-    Observations: s.totalObs,
-    "Open Obs":   s.openObs,
-    NCRs:         s.totalNcr,
-    "Critical":   s.criticalNcr,
-    "Near Miss":  s.nearMiss,
-  }));
   return(
     <div style={{display:"flex",flexDirection:"column",gap:20}}>
-      {/* ══ Welcome banner + Refresh + admin edit button ═════════════════════ */}
-      <div style={{background:"linear-gradient(135deg,#0d9488 0%,#6366f1 100%)",borderRadius:14,padding:"20px 24px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
-        <div>
-          <div style={{color:"#fff",fontWeight:900,fontSize:22,letterSpacing:0.3}}>HSSE Command Center</div>
-          <div style={{color:"rgba(255,255,255,0.8)",fontSize:12,marginTop:4}}>
-            Executive overview · {siteHeroes.length} active projects · {new Date().toLocaleDateString(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"})}
-          </div>
-          <div style={{color:"rgba(255,255,255,0.65)",fontSize:11,marginTop:4,fontStyle:"italic"}}>
-            Last refreshed: {lastRefreshed.toLocaleTimeString()}
-          </div>
-        </div>
-        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-          <button
-            onClick={doRefresh}
-            disabled={refreshing}
-            title="Force-refresh all site data"
-            style={{background:"rgba(255,255,255,0.18)",color:"#fff",border:"1px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:12,cursor:refreshing?"wait":"pointer",display:"flex",alignItems:"center",gap:6,opacity:refreshing?0.75:1}}>
-            <span style={{display:"inline-block",transition:"transform .9s ease",transform:refreshing?"rotate(360deg)":"none"}}>⟳</span>
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </button>
-          {userRole==="admin" && (
-            <>
-              <SavingBadge saving={saving} C={C}/>
-              {editStats
-                ? <><Btn onClick={save} color={C.green}><Save size={14}/>Save Stats</Btn>
-                     <Btn onClick={()=>{setDraft(manualStats);setEditStats(false);}} color={C.muted} style={{background:C.border}}>Cancel</Btn></>
-                : <Btn onClick={()=>setEditStats(true)} color={C.blue} style={{background:"rgba(255,255,255,0.18)",color:"#fff",border:"1px solid rgba(255,255,255,0.3)"}}><Edit2 size={14}/>Edit Global Stats</Btn>}
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* ══ Three site hero cards (Option B) — 8 metrics each, click to open ═ */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:16}}>
-        {siteHeroes.map(s => (
-          <div key={s.id}
-            onClick={()=>setActive&&setActive(s.navId)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e)=>{if(e.key==="Enter"||e.key===" ")setActive&&setActive(s.navId);}}
-            style={{background:s.grad,borderRadius:16,padding:22,cursor:"pointer",border:`1px solid ${s.accent}55`,boxShadow:"0 4px 16px rgba(0,0,0,0.25)",transition:"transform .15s, box-shadow .15s",display:"flex",flexDirection:"column",gap:14}}
-            onMouseEnter={(e)=>{e.currentTarget.style.transform="translateY(-3px)";e.currentTarget.style.boxShadow="0 10px 28px rgba(0,0,0,0.4)";}}
-            onMouseLeave={(e)=>{e.currentTarget.style.transform="none";e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.25)";}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-              <div>
-                <div style={{color:"#fff",fontWeight:900,fontSize:18,lineHeight:1.2}}>{s.label}</div>
-                <div style={{color:"rgba(255,255,255,0.65)",fontSize:11,marginTop:3,letterSpacing:0.4,textTransform:"uppercase"}}>{s.id}</div>
-              </div>
-              <div style={{background:"rgba(255,255,255,0.18)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:99,padding:"4px 10px",color:"#fff",fontSize:11,fontWeight:700,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap"}}>
-                View Site →
-              </div>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
-              {[
-                ["Days LTI",     s.daysLTI,     "#bbf7d0"],
-                ["Open Obs",     s.openObs,     "#fca5a5"],
-                ["Crit NCR",     s.criticalNcr, "#fecaca"],
-                ["Near Miss",    s.nearMiss,    "#fde68a"],
-                ["Total Obs",    s.totalObs,    "#a7f3d0"],
-                ["Manpower",     s.mp,          "#c4b5fd"],
-                ["Incidents",    s.inc,         "#fed7aa"],
-                ["MH Week",      (s.mhWeek||0).toLocaleString(), "#bae6fd"],
-              ].map(([l,v,c]) => (
-                <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:8,padding:"10px 8px",textAlign:"center",minHeight:58,display:"flex",flexDirection:"column",justifyContent:"center"}}>
-                  <div style={{color:c,fontWeight:900,fontSize:19,lineHeight:1}}>{v}</div>
-                  <div style={{color:"rgba(255,255,255,0.72)",fontSize:9,marginTop:4,textTransform:"uppercase",letterSpacing:0.4}}>{l}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* ══ Site comparison chart ═════════════════════════════════════════════ */}
-      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
-        <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>🏗 Site Comparison — Observations, NCRs & Near-Misses</h3>
-        <ResponsiveContainer width="100%" height={240}>
-          <BarChart data={siteCompare}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
-            <XAxis dataKey="site" tick={{fill:C.muted,fontSize:11}}/>
-            <YAxis tick={{fill:C.muted,fontSize:11}}/>
-            <Tooltip contentStyle={chartTooltip(C)}/>
-            <Legend/>
-            <Bar dataKey="Observations" fill={C.teal}    radius={[4,4,0,0]}/>
-            <Bar dataKey="Open Obs"     fill={C.orange}  radius={[4,4,0,0]}/>
-            <Bar dataKey="NCRs"         fill={C.indigo}  radius={[4,4,0,0]}/>
-            <Bar dataKey="Critical"     fill={C.red}     radius={[4,4,0,0]}/>
-            <Bar dataKey="Near Miss"    fill={C.yellow}  radius={[4,4,0,0]}/>
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
+      {userRole==="admin"&&<div style={{display:"flex",justifyContent:"flex-end",gap:8,alignItems:"center"}}>
+        <SavingBadge saving={saving} C={C}/>
+        {editStats?<><Btn onClick={save} color={C.green}><Save size={14}/>Save Stats</Btn><Btn onClick={()=>{setDraft(manualStats);setEditStats(false);}} color={C.muted} style={{background:C.border}}>Cancel</Btn></>:
+          <Btn onClick={()=>setEditStats(true)} color={C.blue}><Edit2 size={14}/>Edit Dashboard Stats</Btn>}
+      </div>}
       {editStats&&(
         <div style={{background:C.card,border:`1px solid ${C.blue}44`,borderRadius:14,padding:20}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>📊 Edit Manual Stats</h3>
-          <ManualStatsEditor draft={draft} setDraft={setDraft} C={C} minWidth={200}/>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12}}>
+            {[["Days Without LTI","daysLTI"],["Manpower","manpower"],["Man-hours (Week)","manhoursWeek"],["Man-hours (Month)","manhoursMonth"],["Man-hours (Year)","manhoursYear"],["Man-hours (Project)","manhoursProject"],["Safety Officers","safetyOfficers"],["First Aiders","firstAiders"],["TBT Attendees","tbtAttendees"]].map(([l,k])=>(
+              <Field key={k} label={l} C={C}><Inp C={C} type="number" value={draft[k]} onChange={e=>setDraft(p=>({...p,[k]:Number(e.target.value)}))}/></Field>
+            ))}
+          </div>
         </div>
       )}
-      {/* NOTE: Option B layout removes the global StatBox strip and the
-            "Per-Project Breakdown" block that previously duplicated what
-            the three site hero cards above already show. The two extra
-            portfolio-level tiles (Active Permits, Expired Training) that
-            are NOT part of the per-site cards live together below so no
-            unique information is lost. */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12}}>
-        <StatBox label="Active Permits"   value={ptw.filter(p=>p.status==="Active").length}       color={C.blue} icon={ClipboardList} sub="Portfolio-wide"    C={C}/>
-        <StatBox label="Expired Training" value={training.filter(t=>t.status==="Expired").length} color={C.red}  icon={BookOpen}      sub="Needs renewal"     C={C}/>
-        <StatBox label="NCRs Overdue"     value={ncr.filter(n=>n.status==="Overdue").length}      color={C.orange} icon={FileWarning} sub="Portfolio-wide"    C={C}/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
+        <StatBox label="Days Without LTI"   value={computedDaysLTI??manualStats.daysLTI??0}     color={C.green}  icon={CheckCircle2} sub={computedDaysLTI!==null?"Auto-computed":"Manual"} C={C}/>
+        <StatBox label="Open Observations"  value={obs.filter(o=>o.status==="Open").length}         color={C.orange} icon={Eye}          sub="Live from data" C={C}/>
+        <StatBox label="Critical NCRs"      value={ncr.filter(n=>n.severity==="Critical").length}   color={C.red}    icon={AlertOctagon}  sub="Live from data" C={C}/>
+        <StatBox label="Active Permits"     value={ptw.filter(p=>p.status==="Active").length}       color={C.blue}   icon={ClipboardList} sub="Live from data" C={C}/>
+        <StatBox label="Expired Training"   value={training.filter(t=>t.status==="Expired").length} color={C.red}    icon={BookOpen}      sub="Needs renewal"  C={C}/>
+        <StatBox label="Near Misses"        value={obs.filter(o=>o.type==="Near Miss").length}      color={C.yellow} icon={AlertTriangle} sub="Live from data" C={C}/>
+        <StatBox label="Total Observations" value={obs.length}                                      color={C.teal}   icon={Eye}           sub="All time"       C={C}/>
+        <StatBox label="NCRs Overdue"       value={ncr.filter(n=>n.status==="Overdue").length}      color={C.orange} icon={FileWarning}   sub="Live from data" C={C}/>
       </div>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
         <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>📋 Project Statistics</h3>
-        <ProjectStatsGrid stats={manualStats} C={C} minWidth={190}/>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:10}}>
+          {[["👷 Manpower",(manualStats?.manpower||0).toLocaleString(),C.purple],["⏱ Man-hours (Week)",(manualStats?.manhoursWeek||0).toLocaleString(),C.teal],["📅 Man-hours (Month)",(manualStats?.manhoursMonth||0).toLocaleString(),C.blue],["📆 Man-hours (Year)",(manualStats?.manhoursYear||0).toLocaleString(),C.indigo],["🏗 Man-hours (Project)",(manualStats?.manhoursProject||0).toLocaleString(),C.green],["👮 Safety Officers",manualStats?.safetyOfficers||0,C.blue],["🏥 First Aiders",manualStats?.firstAiders||0,C.orange],["📢 TBT Attendees",(manualStats?.tbtAttendees||0).toLocaleString(),C.teal]].map(([l,v,c])=>(
+            <div key={l} style={{background:c+"11",border:`1px solid ${c}33`,borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{color:C.sub,fontSize:12}}>{l}</span><span style={{color:c,fontWeight:800,fontSize:15}}>{v}</span>
+            </div>
+          ))}
+        </div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16}}>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
@@ -2074,7 +1811,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
               <XAxis dataKey="month" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted,fontSize:11}}/>
-              <Tooltip contentStyle={chartTooltip(C)}/><Legend/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/>
               <Area type="monotone" dataKey="observations" name="Observations" stroke={C.teal} fill="url(#g1)" strokeWidth={2}/>
               <Area type="monotone" dataKey="incidents" name="Incidents" stroke={C.red} fill="url(#g2)" strokeWidth={2}/>
             </AreaChart>
@@ -2087,7 +1824,7 @@ const Overview = ({obs,ncr,incidents=[],training,ptw,manualStats,setManualStats,
               <Pie data={[{name:"Open",value:obs.filter(o=>o.status==="Open").length||1},{name:"Closed",value:obs.filter(o=>o.status==="Closed").length||1},{name:"Under Review",value:obs.filter(o=>o.status==="Under Review").length||1}]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} dataKey="value" paddingAngle={4}>
                 {[C.red,C.green,C.blue].map((c,i)=><Cell key={i} fill={c}/>)}
               </Pie>
-              <Tooltip contentStyle={chartTooltip(C)}/><Legend/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/>
             </PieChart>
           </ResponsiveContainer>
         </div>
@@ -2125,84 +1862,21 @@ const BulkImporter = ({
   const [errors,setErrors]     = useState([]);
   const [fileName,setFileName] = useState("");
 
-  // ── SECTION METADATA ──────────────────────────────────────────────────────
-  // Each section declares THREE things:
-  //   • templateColumns — the canonical, ordered list of columns that the
-  //     downloaded .xlsx template exposes. Import reads these keys back out.
-  //     Treat this as the contract between the template and the importer.
-  //   • aliases        — extra header strings that should ALSO map to each
-  //     key, for users whose spreadsheets use a different wording.
-  //   • example        — a sample data row used by the Download Template
-  //     button so users see valid values for each column.
-  //
-  // Keep templateColumns and map() in lockstep — if you add/rename a key
-  // here, update both.
   const SECTION_META = {
     observations: {
       color:C.teal,   label:"Observations",
-      // ── Native format: DAN Company "Daily Observation Report" ────────────
-      // The uploaded file structure is a multi-row template with a metadata
-      // header band, a priority legend, and then a data grid starting at row
-      // 12 (0-indexed). When we detect that layout we use `dorConfig` below
-      // to extract rows. Otherwise we fall back to the generic header-matched
-      // template (templateColumns + aliases) so hand-rolled CSVs still work.
-      format:"dor",
-      dorConfig:{
-        headerRowIdx: 11,     // row with "Sr No.", "Aid Ref", "Description of Findings", ...
-        dataStartIdx: 12,
-        columns:{
-          sr:          0,
-          category:    1,
-          description: 4,
-          action:      6,
-          issueDate:   13,
-          closeDate:   17,
-          zone:        18,
-          status:      19,
-          dueDays:     20,
-          priority:    21,
-        },
-        metaCells:{
-          reference: {row:0, col:16},
-          datetime:  {row:1, col:1},
-          location:  {row:1, col:16},
-          observer:  {row:2, col:1},
-          pmc:       {row:2, col:12},
-          contractor:{row:3, col:12},
-        },
-      },
-      // Generic-template fallback (for hand-rolled CSVs without the DOR layout)
-      templateColumns:["id","date","time","area","type","severity","action","status","description","observer","site"],
-      aliases:{
-        id:          ["id","ref","refno","referenceno","observationid","observationno","obsid","srno"],
-        date:        ["date","obsdate","observationdate","reportdate","issuingdate","issuedate"],
-        time:        ["time","obstime","observationtime"],
-        area:        ["area","zone","location","place"],
-        type:        ["type","obstype","observationtype","category","aidref"],
-        severity:    ["severity","priority","risk","risklevel"],
-        action:      ["action","actiontaken","correctiveaction","actionrequired","actionstobetaken"],
-        status:      ["status","state"],
-        description: ["description","desc","details","finding","observation","remarks","comments","notes","descriptionoffindings"],
-        observer:    ["observer","reportedby","raisedby","observername","hsetourby"],
-        site:        ["site","project"],
-      },
-      example:{
-        id:"OBS-0001", date:"2026-01-15", time:"08:30", area:"Zone A",
-        type:"Unsafe Act", severity:"High", action:"Corrective Action Issued",
-        status:"Open", description:"Worker not wearing proper PPE",
-        observer:"John Smith", site:"Site 1",
-      },
+      headers:["date","time","area","zone","type","severity","action","status","desc","description","observer","site","id"],
       required:["date"],
       map:(r,h,idx)=>({
         id:         r[h.id]||genObsId(idx,siteId),
         date:       r[h.date]||new Date().toISOString().split("T")[0],
         time:       r[h.time]||"08:00",
-        area:       r[h.area]||zones[0]||"Zone A",
+        area:       r[h.area]||r[h.zone]||zones[0]||"Zone A",
         type:       r[h.type]||obsTypes[0]||"Unsafe Act",
         severity:   r[h.severity]||obsSeverity[0]||"High",
         action:     r[h.action]||actionsList[0]||"Corrective Action Issued",
         status:     r[h.status]||"Open",
-        desc:       r[h.description]||"",
+        desc:       r[h.desc]||r[h.description]||"",
         observer:   r[h.observer]||user.name,
         observerId: user.uid,
         site:       r[h.site]||siteId,
@@ -2212,24 +1886,7 @@ const BulkImporter = ({
     },
     ncr: {
       color:C.orange, label:"NCR Register",
-      templateColumns:["id","date","category","severity","site","assignee","due","status","closure","description"],
-      aliases:{
-        id:          ["id","ref","refno","ncrid","ncrno","ncrnumber"],
-        date:        ["date","ncrdate","issuedate","raiseddate"],
-        category:    ["category","cat","type","ncrtype"],
-        severity:    ["severity","priority","risk"],
-        site:        ["site","project","location"],
-        assignee:    ["assignee","responsible","assignedto","owner","actionowner"],
-        due:         ["due","duedate","targetdate","closuredate"],
-        status:      ["status","state"],
-        closure:     ["closure","closurepercent","closure%","percent","progress"],
-        description: ["description","desc","details","finding","remarks","comments","notes"],
-      },
-      example:{
-        id:"NCR-0001", date:"2026-01-15", category:"PPE", severity:"Major",
-        site:"Site 1", assignee:"Jane Doe", due:"2026-02-01", status:"Open",
-        closure:0, description:"Missing hard hat in active work zone",
-      },
+      headers:["id","date","category","severity","site","assignee","due","status","closure","desc","description"],
       required:["date"],
       map:(r,h,idx)=>({
         id:       r[h.id]||genNcrId(idx,siteId),
@@ -2241,31 +1898,14 @@ const BulkImporter = ({
         due:      r[h.due]||"",
         status:   r[h.status]||ncrStatus[0]||"Open",
         closure:  Number(r[h.closure])||0,
-        desc:     r[h.description]||"",
+        desc:     r[h.desc]||r[h.description]||"",
         raisedBy: user.name,
         photo:"", imported:true,
       }),
     },
     risks: {
       color:C.purple, label:"Risk Register",
-      templateColumns:["id","hazard","category","likelihood","impact","controls","residual","owner","status"],
-      aliases:{
-        id:         ["id","ref","refno","riskid","riskno"],
-        hazard:     ["hazard","hazarddescription","description","desc","risk","details"],
-        category:   ["category","cat","type","risktype"],
-        likelihood: ["likelihood","probability","prob","freq","frequency"],
-        impact:     ["impact","consequence","severity"],
-        controls:   ["controls","mitigations","controlmeasures","measures"],
-        residual:   ["residual","residualrisk","residualscore"],
-        owner:      ["owner","responsible","assignedto","riskowner"],
-        status:     ["status","state"],
-      },
-      example:{
-        id:"R-0001", hazard:"Working at height without harness",
-        category:"Physical", likelihood:3, impact:4,
-        controls:"Daily toolbox talks, harness inspection, supervisor signoff",
-        residual:2, owner:"Site HSE Officer", status:"Active",
-      },
+      headers:["id","hazard","category","likelihood","impact","controls","residual","owner","status"],
       required:["hazard"],
       map:(r,h,idx)=>({
         id:          r[h.id]||`R-${Date.now()}-${idx}`,
@@ -2285,211 +1925,16 @@ const BulkImporter = ({
   const meta = SECTION_META[section];
   const existingSet = new Set(Array.isArray(existingIds)?existingIds:Array.from(existingIds||[]));
 
-  // ── Column-header auto-detection ──────────────────────────────────────────
-  // Strategy: for each canonical key, walk its alias list (itself + synonyms)
-  // and try three progressively looser matches in order:
-  //   1. exact normalized match       ("Observation Date" → "observationdate")
-  //   2. starts-with on either side   ("Description" matches alias "desc")
-  //   3. substring (only for aliases of length ≥ 4 — short words like "id"
-  //      must match cleanly, otherwise they pick up "Provide Notes" etc.)
-  // Once a column is claimed by one key it cannot be re-claimed by another,
-  // so "Description" can't accidentally also bind to "desc" and double-map.
-  const normalize = (s) => String(s||"").toLowerCase().replace(/[\s_\-\.\/()]/g,"").trim();
-
+  // ── Auto-detect column headers ─────────────────────────────────────────────
   const mapHeaders = (headerRow) => {
-    const normCols = headerRow.map(normalize);
-    const claimed  = new Set();
-    const h        = {};
-
-    const tryClaim = (key, predicate) => {
-      if (h[key] !== undefined) return;
-      for (let i = 0; i < normCols.length; i++) {
-        if (claimed.has(i)) continue;
-        if (!normCols[i]) continue;
-        if (predicate(normCols[i])) { h[key] = i; claimed.add(i); return; }
-      }
-    };
-
-    const aliasesFor = (key) => {
-      const list = (meta.aliases && meta.aliases[key]) || [key];
-      return list.map(normalize).filter(Boolean);
-    };
-
-    // Pass 1: exact matches
-    meta.templateColumns.forEach(key => {
-      const aliases = aliasesFor(key);
-      tryClaim(key, col => aliases.includes(col));
-    });
-    // Pass 2: starts-with either side
-    meta.templateColumns.forEach(key => {
-      const aliases = aliasesFor(key);
-      tryClaim(key, col => aliases.some(a => col.startsWith(a) || a.startsWith(col)));
-    });
-    // Pass 3: substring — skip short aliases that would false-positive
-    meta.templateColumns.forEach(key => {
-      const aliases = aliasesFor(key).filter(a => a.length >= 4);
-      if (!aliases.length) return;
-      tryClaim(key, col => aliases.some(a => col.includes(a)));
+    const h = {};
+    meta.headers.forEach(key=>{
+      const idx = headerRow.findIndex(c=>
+        String(c||"").toLowerCase().replace(/[\s_\-./]/g,"").includes(key.replace(/[\s_-]/g,""))
+      );
+      if(idx>=0) h[key]=idx;
     });
     return h;
-  };
-
-  // ── Detect: does this sheet match the Daily Observation Report layout? ────
-  // Signal: row 11 (0-indexed) column A contains "Sr No." AND column R / S
-  // area contains "Zone" / "Status" labels. We check loosely so cosmetic
-  // tweaks (extra whitespace, different casing) don't break detection.
-  const looksLikeDOR = (raw) => {
-    if (!meta.dorConfig) return false;
-    const {headerRowIdx, columns} = meta.dorConfig;
-    const hr = raw[headerRowIdx];
-    if (!hr) return false;
-    const cellAt = (i) => String(hr[i]||"").toLowerCase().replace(/\s+/g,"");
-    return cellAt(columns.sr).includes("srno")
-        && (cellAt(columns.zone).includes("zone") || cellAt(columns.status).includes("status"));
-  };
-
-  // ── Parse the Daily Observation Report format ────────────────────────────
-  // Uses the fixed column positions declared in meta.dorConfig, and pulls
-  // report-level metadata (reference, date/time, observer) from the top band
-  // so they can default into every row.
-  const parseDOR = (raw) => {
-    const {dataStartIdx, columns:cols, metaCells} = meta.dorConfig;
-    const cellAt = (row, col) => {
-      const r = raw[row]; if (!r) return "";
-      return String(r[col]==null?"":r[col]).trim();
-    };
-
-    // Report-level metadata (all rows inherit these unless overridden)
-    const reportRef = cellAt(metaCells.reference.row, metaCells.reference.col) || "UNKNOWN-REF";
-    const datetimeRaw = cellAt(metaCells.datetime.row, metaCells.datetime.col);
-    const reportDate = parseExcelDate(datetimeRaw) || new Date().toISOString().split("T")[0];
-    // Pull time from the "date and time" cell if it's in "M/D/YY HH:MM" form
-    const timeMatch = datetimeRaw.match(/(\d{1,2}):(\d{2})/);
-    const reportTime = timeMatch ? `${timeMatch[1].padStart(2,"0")}:${timeMatch[2]}` : "08:00";
-    // Observer cell looks like "DAN :Mohammed Alshehri" — strip the prefix
-    const observerRaw = cellAt(metaCells.observer.row, metaCells.observer.col);
-    const reportObserver = (observerRaw.split(":")[1] || observerRaw || user.name).trim();
-
-    const records = [];
-    for (let i = dataStartIdx; i < raw.length; i++) {
-      const row = raw[i]; if (!row) continue;
-      const srRaw = row[cols.sr];
-      // Skip rows where column A is not a number (disclaimer/empty rows)
-      if (srRaw == null || srRaw === "" || isNaN(parseInt(String(srRaw)))) continue;
-
-      const srPadded   = String(parseInt(srRaw)).padStart(4,"0");
-      const id         = `${reportRef}-${srPadded}`;
-      const category   = cellAt(i, cols.category) || "Unsafe Condition";
-      const description= cellAt(i, cols.description);
-      const action     = cellAt(i, cols.action) || "Corrective Action Issued";
-      const zone       = cellAt(i, cols.zone) || zones[0] || "General";
-      const issueDate  = parseExcelDate(row[cols.issueDate]) || reportDate;
-      const closeDate  = parseExcelDate(row[cols.closeDate]) || "";
-      const priority   = parsePriority(cellAt(i, cols.priority));
-      // If priority is "Positive" (Good Practice), force status to Closed
-      const rawStatus  = cellAt(i, cols.status);
-      const status     = priority==="Positive" ? "Closed" : parseStatus(rawStatus);
-      // Skip completely blank data rows (no description AND no category useful content)
-      if (!description && (!category || category === "Unsafe Condition")) continue;
-
-      // Normalize CRLF → LF so downstream rendering is clean, and pick the
-      // first non-empty line for the short `action` field (full text stays in
-      // `actionDetail`).
-      const actionClean = action.replace(/\r/g, "");
-      const actionShort = actionClean.split("\n").map(s=>s.trim()).find(Boolean) || actionClean;
-      records.push({
-        id,
-        date:       issueDate,
-        time:       reportTime,
-        area:       zone,
-        type:       priority==="Positive" ? "Good Practice" : (category || "Unsafe Condition"),
-        severity:   priority,
-        action:     actionShort.slice(0,200),
-        actionDetail: actionClean,
-        status,
-        desc:       (description || (priority==="Positive" ? "Good Practice (GP)" : "")).replace(/\r/g,""),
-        observer:   reportObserver,
-        observerId: user.uid,
-        site:       siteId,
-        openPhoto:"",
-        closePhoto:"",
-        closeDate,
-        closeTime: closeDate ? "00:00" : "",
-        reportRef,
-        imported:true,
-      });
-    }
-    return records;
-  };
-
-  // ── Download a blank template (.xlsx) ─────────────────────────────────────
-  // For sections flagged with `format:"dor"` we emit the full Daily
-  // Observation Report template (metadata band + priority legend + data
-  // grid). For other sections we emit a plain canonical-columns template.
-  const downloadTemplate = async () => {
-    const XLSX = await import("xlsx");
-    const wb = XLSX.utils.book_new();
-
-    if (meta.format === "dor") {
-      // Build a 23-column layout matching the uploaded DOR file exactly
-      const width = 23;
-      const blank = () => Array(width).fill("");
-      const row = (cells) => { const r = blank(); Object.entries(cells).forEach(([k,v])=>r[Number(k)]=v); return r; };
-
-      const aoa = [
-        // Row 0: Project / Reference
-        row({0:" Project:", 1:"Palm 1-Al Ahsa", 9:"Reference:", 16:"01-000001-000000-DAN-RPT-HSE-00001"}),
-        // Row 1: Date & time / Location
-        row({0:"Date and time:  ", 1:"4/7/26 8:30", 9:"Location: ", 16:"AD-AG-WE-LA-DP."}),
-        // Row 2: HSE Tour by / PMC
-        row({0:"HSE Tour by:", 1:"DAN :Observer Name", 12:"PMC; PMC Name"}),
-        // Row 3: Contractor
-        row({12:"Contractor: Contractor Name"}),
-        // Row 4-9: Priority legend
-        row({0:"Response", 6:"Definition"}),
-        row({0:"A", 2:"Immediate",      6:"Immediate action is required to eliminate the high risk of accidents or incident."}),
-        row({0:"B", 2:"Within 24 Hrs",  6:"No immediate risk of accident or incident"}),
-        row({0:"C", 2:"Within 3 days",  6:"Action is required to minimize health, safety, or environmental risks."}),
-        row({0:"D", 2:"As agreed",      6:"Improvement action is required to meet best practices and continually improve standards"}),
-        row({0:"GP",2:"Good Practice",  6:"Good practice to be shared with other Projects"}),
-        // Row 10: blank spacer
-        blank(),
-        // Row 11: Data column headers
-        row({
-          0:"Sr No.", 1:"Aid Ref", 4:"Description of Findings",
-          6:"Action(s) to be taken & recommendations",
-          9:"Supporting Photo", 13:"Issuing dates",
-          14:"Closeout Photo", 17:"Closeout dates",
-          18:"Zone", 19:"Status", 20:"Due Date", 21:"Priority H/ M/L/I",
-        }),
-        // Rows 12-14: Example data rows
-        row({0:1, 1:"Chemicals / COSHH", 4:"Unsafe storage of chemical materials...", 6:"The contractor must remove the chemical materials...", 13:"4/7/26", 17:"4/8/26", 18:"Laydown area", 19:"Open", 20:1, 21:"High (H)"}),
-        row({0:2, 1:"Fire protection",   4:"Fire extinguisher inspection tag unclear", 6:"Replace inspection tag",                             13:"4/7/26", 17:"4/8/26", 18:"Laydown area", 19:"Open", 20:1, 21:"High (H)"}),
-        row({0:3, 4:"Good Practice (GP)", 13:"4/7/26", 17:"4/7/26", 19:"Closed", 20:0, 21:"Good Practice (GP)"}),
-        // A few blank rows ready to fill
-        blank(), blank(), blank(), blank(), blank(),
-      ];
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      // Column widths to make it readable
-      ws["!cols"] = [
-        {wch:8}, {wch:18}, {wch:6}, {wch:6}, {wch:40}, {wch:6}, {wch:40},
-        {wch:6}, {wch:6}, {wch:12}, {wch:6}, {wch:6}, {wch:20},
-        {wch:12}, {wch:12}, {wch:6}, {wch:6}, {wch:12},
-        {wch:14}, {wch:10}, {wch:10}, {wch:18}, {wch:10},
-      ];
-      XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    } else {
-      // Generic canonical-columns template (NCR, Risks)
-      const headers  = meta.templateColumns.slice();
-      const sample   = headers.map(k => (meta.example && meta.example[k]!==undefined) ? meta.example[k] : "");
-      const blankRow = headers.map(() => "");
-      const ws = XLSX.utils.aoa_to_sheet([headers, sample, blankRow, blankRow, blankRow]);
-      ws["!cols"] = headers.map(h => ({ wch: Math.max(14, h.length + 4) }));
-      XLSX.utils.book_append_sheet(wb, ws, meta.label.slice(0,28));
-    }
-
-    const fileName = `${meta.label.replace(/\s+/g,"_")}_Template.xlsx`;
-    XLSX.writeFile(wb, fileName);
   };
 
   // ── Parse file ─────────────────────────────────────────────────────────────
@@ -2499,44 +1944,16 @@ const BulkImporter = ({
     const XLSX = await import("xlsx");
     const buf  = await file.arrayBuffer();
     const wb   = XLSX.read(buf,{type:"array",cellDates:true});
-    // Always read Sheet1 if present (matches the DOR template convention);
-    // fall back to the first sheet otherwise
-    const sheetName = wb.SheetNames.find(n => n.trim().toLowerCase() === "sheet1") || wb.SheetNames[0];
-    const ws   = wb.Sheets[sheetName];
+    const ws   = wb.Sheets[wb.SheetNames[0]];
     const raw  = XLSX.utils.sheet_to_json(ws,{header:1,defval:"",raw:false,dateNF:"yyyy-mm-dd"});
 
-    // ── DOR format (observations) takes priority when the layout matches ──
-    if (meta.format === "dor" && looksLikeDOR(raw)) {
-      const parsed = parseDOR(raw);
-      setRows(parsed);
-      setTotal(parsed.length);
-      setSkipped(parsed.filter(r=>existingSet.has(r.id)).length);
-      setStage("preview");
-      e.target.value="";
-      return;
-    }
-
-    // ── Generic header-matched fallback ──────────────────────────────────
+    // Find header row (first row with more than 2 non-empty cells)
     const headerIdx = raw.findIndex(r=>r.filter(Boolean).length>2);
     if(headerIdx<0){alert("Could not find a header row. Make sure row 1 or 2 has column names.");return;}
 
     const headerRow = raw[headerIdx].map(c=>String(c||"").toLowerCase().trim());
-    let h = mapHeaders(headerRow);
-
-    // ── Positional fallback ─────────────────────────────────────────────────
-    // If fewer than half of the required template columns resolved to a real
-    // column, we assume the sheet doesn't have our headers at all (e.g. the
-    // user copy-pasted data without a header row, or used a totally foreign
-    // schema). In that case we map positionally against templateColumns so
-    // the rows still flow through in the canonical order.
-    const matchCount  = Object.keys(h).length;
-    const usePositional = matchCount < Math.ceil(meta.templateColumns.length/2);
-    if (usePositional) {
-      h = {};
-      meta.templateColumns.forEach((key, i) => { if (i < headerRow.length) h[key] = i; });
-    }
-
-    const dataRows = raw.slice(headerIdx + (usePositional ? 0 : 1)).filter(r=>r.some(Boolean));
+    const h = mapHeaders(headerRow);
+    const dataRows = raw.slice(headerIdx+1).filter(r=>r.some(Boolean));
 
     const parsed = dataRows.map((r,i)=>{
       const mapped = {};
@@ -2576,54 +1993,14 @@ const BulkImporter = ({
 
   return(
     <div>
-      {/* ── IDLE: file picker + template download ── */}
+      {/* ── IDLE: file picker ── */}
       {stage==="idle"&&(
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <label style={{background:color+"22",border:`2px dashed ${color}55`,borderRadius:12,padding:"18px 24px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,cursor:"pointer",flexDirection:"column",textAlign:"center"}}>
-            <div style={{fontSize:28}}>📊</div>
-            <div style={{color,fontWeight:700,fontSize:13}}>Click to import {meta.label} from Excel / CSV</div>
-            <div style={{color:C.muted,fontSize:11}}>Supports .xlsx · .xls · .csv · Multiple sheets · Auto column detection</div>
-            <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{display:"none"}}/>
-          </label>
-
-          {/* Template helper — exact column order + download button */}
-          <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
-            <div style={{fontSize:11,color:C.muted,lineHeight:1.6,flex:1,minWidth:240}}>
-              {meta.format === "dor" ? (
-                <>
-                  <div style={{color:C.text,fontWeight:700,fontSize:12,marginBottom:2}}>
-                    📋 Daily Observation Report format
-                  </div>
-                  <div style={{color}}>
-                    Sheet1 · data starts at row 13 · columns:
-                    <span style={{fontFamily:"monospace",marginLeft:4}}>
-                      Sr No · Aid Ref · Description · Action · Issuing date · Closeout date · Zone · Status · Due · Priority
-                    </span>
-                  </div>
-                  <div style={{marginTop:4}}>
-                    Row 1 reference, row 2 date/time &amp; location, row 3 observer (HSE Tour by)
-                    — all auto-detected. Good Practice rows (priority <em>GP</em>) are imported as <em>Closed</em>.
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div style={{color:C.text,fontWeight:700,fontSize:12,marginBottom:2}}>📋 Expected column order</div>
-                  <div style={{fontFamily:"monospace",color}}>
-                    {meta.templateColumns.join(" · ")}
-                  </div>
-                  <div style={{marginTop:4}}>
-                    Your spreadsheet can list columns <strong>in any order</strong> as long as the header names match
-                    (e.g. <em>"Description"</em>, <em>"Details"</em>, or <em>"Remarks"</em> all map to the same field).
-                    If no matching headers are found, columns are read positionally in the order shown above.
-                  </div>
-                </>
-              )}
-            </div>
-            <Btn onClick={downloadTemplate} color={color} style={{whiteSpace:"nowrap"}}>
-              <Download size={14}/>Download Template
-            </Btn>
-          </div>
-        </div>
+        <label style={{background:color+"22",border:`2px dashed ${color}55`,borderRadius:12,padding:"18px 24px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,cursor:"pointer",flexDirection:"column",textAlign:"center"}}>
+          <div style={{fontSize:28}}>📊</div>
+          <div style={{color,fontWeight:700,fontSize:13}}>Click to import {meta.label} from Excel / CSV</div>
+          <div style={{color:C.muted,fontSize:11}}>Supports .xlsx · .xls · .csv · Multiple sheets · Auto column detection</div>
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{display:"none"}}/>
+        </label>
       )}
 
       {/* ── PREVIEW ── */}
@@ -2707,7 +2084,8 @@ const NCR = ({user,ncr,ncrCats=DEFAULT_NCR_CATS,ncrSeverity=DEFAULT_NCR_SEVERITY
   const [showForm,setShowForm]=useState(false);
   const [showBulk,setShowBulk]=useState(false);
   const role=ROLE_META[user.role];
-  const today = todayStr();
+  const _nd=new Date();
+  const today=`${_nd.getFullYear()}-${String(_nd.getMonth()+1).padStart(2,"0")}-${String(_nd.getDate()).padStart(2,"0")}`;
   const defaultSite=user.site==="All Sites"?"Site 1":user.site;
   const [form,setForm]=useState({date:today,category:ncrCats[0]||"PPE",severity:ncrSeverity[0]||"Major",site:defaultSite,assignee:"",due:"",status:ncrStatus[0]||"Open",closure:0,desc:""});
   // ID recomputes when site changes
@@ -2728,14 +2106,16 @@ const NCR = ({user,ncr,ncrCats=DEFAULT_NCR_CATS,ncrSeverity=DEFAULT_NCR_SEVERITY
   };
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
-      <PillGrid minWidth={130}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
         {[["Total",ncr.length,C.blue],["Critical",ncr.filter(n=>n.severity==="Critical").length,C.red],["Overdue",ncr.filter(n=>n.status==="Overdue").length,C.orange],["Closed",ncr.filter(n=>n.status==="Closed").length,C.green]].map(([l,v,c])=>(
-          <StatPill key={l} label={l} value={v} color={c} C={C}/>
+          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
+            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div><div style={{color:"#94a3b8",fontSize:11}}>{l}</div>
+          </div>
         ))}
-      </PillGrid>
+      </div>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,flexWrap:"wrap"}}>
-        {can(user,"ncr",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={C.orange}><Plus size={14}/>Raise NCR</Btn>}
-        {can(user,"ncr",user.site,"add")&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
+        {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.orange}><Plus size={14}/>Raise NCR</Btn>}
+        {role.canAdd&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
         <Btn onClick={()=>exportCSV(ncr,"ncr-register")} color={C.indigo}><Download size={14}/>CSV</Btn>
       </div>
       {showBulk&&(
@@ -2830,8 +2210,8 @@ const Risk = ({user,risks,riskCats=DEFAULT_RISK_CATS,riskStatus=DEFAULT_RISK_STA
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,flexWrap:"wrap"}}>
-        {can(user,"risks",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={C.purple}><Plus size={14}/>Add Risk</Btn>}
-        {can(user,"risks",user.site,"add")&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
+        {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={C.purple}><Plus size={14}/>Add Risk</Btn>}
+        {role.canAdd&&<Btn onClick={()=>setShowBulk(p=>!p)} color={C.teal}><Download size={14}/>{showBulk?"Hide Import":"📊 Bulk Import"}</Btn>}
         <Btn onClick={()=>exportCSV(risks,"risk-register")} color={C.indigo}><Download size={14}/>CSV</Btn>
       </div>
       {showBulk&&(
@@ -2867,7 +2247,7 @@ const Risk = ({user,risks,riskCats=DEFAULT_RISK_CATS,riskStatus=DEFAULT_RISK_STA
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>Distribution</h3>
           <ResponsiveContainer width="100%" height={180}>
-            <PieChart><Pie data={[{name:"Critical",value:risks.filter(r=>riskScore(r)>=15).length||1},{name:"High",value:risks.filter(r=>{const s=riskScore(r);return s>=8&&s<15;}).length||1},{name:"Medium",value:risks.filter(r=>{const s=riskScore(r);return s>=4&&s<8;}).length||1},{name:"Low",value:risks.filter(r=>riskScore(r)<4).length||1}]} cx="50%" cy="50%" outerRadius={70} dataKey="value" label={({name,value})=>`${name}:${value}`}>{[C.red,C.orange,C.yellow,C.green].map((c,i)=><Cell key={i} fill={c}/>)}</Pie><Tooltip contentStyle={chartTooltip(C)}/></PieChart>
+            <PieChart><Pie data={[{name:"Critical",value:risks.filter(r=>riskScore(r)>=15).length||1},{name:"High",value:risks.filter(r=>{const s=riskScore(r);return s>=8&&s<15;}).length||1},{name:"Medium",value:risks.filter(r=>{const s=riskScore(r);return s>=4&&s<8;}).length||1},{name:"Low",value:risks.filter(r=>riskScore(r)<4).length||1}]} cx="50%" cy="50%" outerRadius={70} dataKey="value" label={({name,value})=>`${name}:${value}`}>{[C.red,C.orange,C.yellow,C.green].map((c,i)=><Cell key={i} fill={c}/>)}</Pie><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/></PieChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -3218,38 +2598,25 @@ const BODY_PARTS = [
   "Knee","Leg","Multiple","Neck","Nose","Pelvis","Shoulder","Toe, toenail","Trunk","Wrist","Other",
 ];
 
-// ── INCIDENT CLASSIFICATION TABLE ────────────────────────────────────────────
-// Every incident-code helper below reads from this ONE table instead of
-// re-listing the codes. If a new code is added (e.g. "PSE"), add a single row.
-// Fields per row:
-//   group       — "Injury" | "Damage-Only" | "Environmental"
-//   fullLabel   — long display label, e.g. "First Aid Case (FAC)"
-//   badgeLabel  — short badge label, e.g. "FAC – First Aid"
-//   defaultType — the default sub-type value when the code is selected
-//   color       — dot/tag color for the code
-const INCIDENT_CODES = {
-  INJ:         {group:"Injury",        fullLabel:"Injury (INJ)",              badgeLabel:"INJ – Injury",    defaultType:"INJ",          color:"#ef4444"},
-  FAC:         {group:"Injury",        fullLabel:"First Aid Case (FAC)",      badgeLabel:"FAC – First Aid", defaultType:"FAC",          color:"#eab308"},
-  MTC:         {group:"Injury",        fullLabel:"Medical Treatment (MTC)",   badgeLabel:"MTC – Medical",   defaultType:"MTC",          color:"#fb923c"},
-  LTI:         {group:"Injury",        fullLabel:"Lost Time Injury (LTI)",    badgeLabel:"LTI – Lost Time", defaultType:"LTI",          color:"#dc2626"},
-  RWC:         {group:"Injury",        fullLabel:"Restricted Work Case (RWC)",badgeLabel:"RWC – Restricted",defaultType:"RWC",          color:"#f97316"},
-  MVA:         {group:"Damage-Only",   fullLabel:"Motor Vehicle Accident",    badgeLabel:"MVA – Vehicle",   defaultType:"Asset",        color:"#a855f7"},
-  PD:          {group:"Damage-Only",   fullLabel:"Property Damage",           badgeLabel:"PD – Property",   defaultType:"Asset",        color:"#3b82f6"},
-  "PD (FIRE)": {group:"Damage-Only",   fullLabel:"Property Damage – Fire",    badgeLabel:"PD – Fire",       defaultType:"Fire",         color:"#f43f5e"},
-  ENV:         {group:"Environmental", fullLabel:"Environmental",             badgeLabel:"ENV",             defaultType:"Oil spillage", color:"#22c55e"},
-};
-const incCode = (code) => INCIDENT_CODES[(code||"").toUpperCase().trim()] || null;
-// Convenience arrays (used in .filter(...).includes()) — derived once, no dup.
-const INJURY_TYPES = Object.keys(INCIDENT_CODES).filter(k=>INCIDENT_CODES[k].group==="Injury");
-const DAMAGE_TYPES = Object.keys(INCIDENT_CODES).filter(k=>INCIDENT_CODES[k].group==="Damage-Only");
-const ENV_TYPES    = Object.keys(INCIDENT_CODES).filter(k=>INCIDENT_CODES[k].group==="Environmental");
-
 // Derive classification from DAM/INJ/ENV code
-const deriveClassification = (code) => incCode(code)?.group || "Damage-Only";
+const deriveClassification = (code) => {
+  const t = (code||"").toUpperCase().trim();
+  if(["FAC","MTC","RWC","LTI","INJ"].includes(t)) return "Injury";
+  if(["MVA","PD","PD (FIRE)"].includes(t))        return "Damage-Only";
+  if(t==="ENV")                                    return "Environmental";
+  return "Damage-Only";
+};
 
 // Derive "Type" sub-field from DAM/INJ/ENV code
-// eslint-disable-next-line no-unused-vars
-const deriveType = (code, currentClassification) => incCode(code)?.defaultType || "";
+const deriveType = (code, currentClassification) => {
+  const t = (code||"").toUpperCase().trim();
+  if(["FAC","MTC","RWC","LTI","INJ"].includes(t)) return t; // type IS the subtype for injuries
+  if(t==="MVA")         return "Asset";
+  if(t==="PD (FIRE)")   return "Fire";
+  if(t==="PD")          return "Asset";
+  if(t==="ENV")         return "Oil spillage";
+  return "";
+};
 
 const ROOT_CAUSES = [
   "Sub-standard Housekeeping","Neglecting Safety Procedures","Lack of competency",
@@ -3261,31 +2628,67 @@ const INCIDENT_AREAS = [
   "Agritourism","Wellness","Advanture","Arch","Event Hall","Community Center",
   "Office area","Site Route","Dumping area","Messhall Parking","Laydown","Fabrication","Other",
 ];
+// eslint-disable-next-line no-unused-vars
 const RA_LEVELS = [
   {label:"Low",color:"#22c55e"},{label:"Moderate",color:"#eab308"},
   {label:"High",color:"#f97316"},{label:"Critical",color:"#ef4444"},
 ];
 
-const incidentColor = (type, C) => incCode(type)?.color || C.muted;
+const incidentColor = (type, C) => ({
+  INJ:"#ef4444", LTI:"#dc2626", RWC:"#f97316", MTC:"#fb923c",
+  FAC:"#eab308", MVA:"#a855f7", PD:"#3b82f6", "PD (FIRE)":"#f43f5e",
+  ENV:"#22c55e"
+}[(type||"").toUpperCase().trim()] || C.muted);
 
-// Full classification label: combines Injury/Damage/Environmental with injury subtype.
-// Falls back to the free-text classificationField if no code is set.
+// Full classification label: combines Injury/Damage/Environmental with injury subtype
+// e.g. damInjEnv="FAC" → "Injury · FAC"
+//      damInjEnv="MVA" → "Damage-Only · MVA"
+//      damInjEnv="ENV" → "Environmental"
+const INJURY_TYPES   = ["INJ","FAC","MTC","LTI","RWC"];
+const DAMAGE_TYPES   = ["MVA","PD","PD (FIRE)"];
+const ENV_TYPES      = ["ENV"];
+
 const classificationLabel = (damInjEnv, classificationField) => {
-  const c = incCode(damInjEnv);
-  if(!c) return classificationField || (damInjEnv||"").toUpperCase().trim() || "—";
-  return c.fullLabel;
+  const t = (damInjEnv||"").toUpperCase().trim();
+  if(!t) return classificationField||"—";
+  if(INJURY_TYPES.includes(t)) {
+    const subLabel = {
+      INJ: "Injury (INJ)",
+      FAC: "First Aid Case (FAC)",
+      MTC: "Medical Treatment (MTC)",
+      LTI: "Lost Time Injury (LTI)",
+      RWC: "Restricted Work Case (RWC)",
+    }[t] || t;
+    return subLabel;
+  }
+  if(DAMAGE_TYPES.includes(t)) {
+    const subLabel = {
+      MVA:        "Motor Vehicle Accident",
+      PD:         "Property Damage",
+      "PD (FIRE)":"Property Damage – Fire",
+    }[t] || t;
+    return subLabel;
+  }
+  if(ENV_TYPES.includes(t)) return "Environmental";
+  return classificationField || t;
 };
 
 // Short badge label for compact display
-const classificationBadge = (damInjEnv) =>
-  incCode(damInjEnv)?.badgeLabel || (damInjEnv||"").toUpperCase().trim() || "—";
+const classificationBadge = (damInjEnv) => {
+  const t = (damInjEnv||"").toUpperCase().trim();
+  return { INJ:"INJ – Injury", FAC:"FAC – First Aid", MTC:"MTC – Medical",
+           LTI:"LTI – Lost Time", RWC:"RWC – Restricted",
+           MVA:"MVA – Vehicle", PD:"PD – Property", "PD (FIRE)":"PD – Fire",
+           ENV:"ENV" }[t] || t || "—";
+};
 
-// Color for classification category (group-level, not code-level)
+// Color for classification category
+// eslint-disable-next-line no-unused-vars
 const classColor = (damInjEnv, C) => {
-  const g = incCode(damInjEnv)?.group;
-  if(g==="Injury")        return C.red;
-  if(g==="Damage-Only")   return C.purple;
-  if(g==="Environmental") return C.green;
+  const t = (damInjEnv||"").toUpperCase().trim();
+  if(INJURY_TYPES.includes(t))  return C.red;
+  if(DAMAGE_TYPES.includes(t))  return C.purple;
+  if(ENV_TYPES.includes(t))     return C.green;
   return C.muted;
 };
 
@@ -3634,7 +3037,7 @@ const IncidentRegisterPanel = ({incidents, onAddIncident, onDeleteIncident, user
                 <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
                 <XAxis dataKey="month" tick={{fill:C.muted,fontSize:11}}/>
                 <YAxis tick={{fill:C.muted,fontSize:10}} allowDecimals={false}/>
-                <Tooltip contentStyle={chartTooltip(C)}/>
+                <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
                 <Legend/>
                 <Bar dataKey="Injuries"         fill="#ef4444" radius={[3,3,0,0]}/>
                 <Bar dataKey="MVA"              fill="#a855f7" radius={[3,3,0,0]}/>
@@ -3843,12 +3246,10 @@ const Weekly = ({weeklyData,setWeeklyData,manualStats,setManualStats,incidents=[
         </div>
         <div style={{padding:"10px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap",gap:8}}>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-            {userRole!=="viewer"&&(
-              <label style={{background:C.teal,color:"#fff",borderRadius:8,padding:"6px 14px",fontWeight:700,fontSize:12,cursor:importing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:6,opacity:importing?0.6:1}}>
-                <Download size={12}/>{importing?"Importing...":"📊 Import Excel"}
-                <input type="file" accept=".xlsx,.xls" multiple onChange={handleExcelImport} style={{display:"none"}} disabled={importing}/>
-              </label>
-            )}
+            <label style={{background:C.teal,color:"#fff",borderRadius:8,padding:"6px 14px",fontWeight:700,fontSize:12,cursor:importing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:6,opacity:importing?0.6:1}}>
+              <Download size={12}/>{importing?"Importing...":"📊 Import Excel"}
+              <input type="file" accept=".xlsx,.xls" multiple onChange={handleExcelImport} style={{display:"none"}} disabled={importing}/>
+            </label>
             <button onClick={()=>setShowCumulative(p=>!p)}
               style={{background:showCumulative?C.gold+"33":C.bg,color:showCumulative?C.gold:C.sub,border:`1px solid ${showCumulative?C.gold:C.border}`,borderRadius:8,padding:"6px 14px",fontWeight:700,fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
               <TrendingUp size={13}/>📈 Cumulative Stats
@@ -3934,11 +3335,11 @@ const Weekly = ({weeklyData,setWeeklyData,manualStats,setManualStats,incidents=[
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 12px",fontSize:13}}>Safety Observations</h3>
-          <ResponsiveContainer width="100%" height={160}><PieChart><Pie data={obsData} cx="50%" cy="50%" outerRadius={60} dataKey="value" label={({name,value})=>`${name}: ${value}`}>{obsData.map((d,i)=><Cell key={i} fill={d.fill}/>)}</Pie><Tooltip contentStyle={chartTooltip(C)}/></PieChart></ResponsiveContainer>
+          <ResponsiveContainer width="100%" height={160}><PieChart><Pie data={obsData} cx="50%" cy="50%" outerRadius={60} dataKey="value" label={({name,value})=>`${name}: ${value}`}>{obsData.map((d,i)=><Cell key={i} fill={d.fill}/>)}</Pie><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/></PieChart></ResponsiveContainer>
         </div>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 12px",fontSize:13}}>Safe Man-Hours</h3>
-          <ResponsiveContainer width="100%" height={160}><BarChart data={manHours}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="name" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted,fontSize:10}}/><Tooltip contentStyle={chartTooltip(C)} formatter={v=>v.toLocaleString()}/><Bar dataKey="value" fill={C.teal} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
+          <ResponsiveContainer width="100%" height={160}><BarChart data={manHours}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="name" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted,fontSize:10}}/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}} formatter={v=>v.toLocaleString()}/><Bar dataKey="value" fill={C.teal} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
         </div>
         <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <h3 style={{color:C.text,fontWeight:700,margin:"0 0 12px",fontSize:13}}>Key Stats</h3>
@@ -4072,12 +3473,12 @@ const Monthly = ({obs,ncr,monthlyState,setMonthlyState,C}) => {
           )}
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
             <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>6-Month HSSE Trend</h3>
-            <ResponsiveContainer width="100%" height={250}><LineChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={chartTooltip(C)}/><Legend/><Line type="monotone" dataKey="observations" stroke={C.teal} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="nearMiss" stroke={C.yellow} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="incidents" stroke={C.red} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="welfare" stroke={C.purple} strokeWidth={2} dot={{r:3}}/></LineChart></ResponsiveContainer>
+            <ResponsiveContainer width="100%" height={250}><LineChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/><Line type="monotone" dataKey="observations" stroke={C.teal} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="nearMiss" stroke={C.yellow} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="incidents" stroke={C.red} strokeWidth={2} dot={{r:3}}/><Line type="monotone" dataKey="welfare" stroke={C.purple} strokeWidth={2} dot={{r:3}}/></LineChart></ResponsiveContainer>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16}}>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
               <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>NCR Trend</h3>
-              <ResponsiveContainer width="100%" height={200}><BarChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={chartTooltip(C)}/><Bar dataKey="ncrOpen" name="Open NCRs" fill={C.orange} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height={200}><BarChart data={trend}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis tick={{fill:C.muted}}/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Bar dataKey="ncrOpen" name="Open NCRs" fill={C.orange} radius={[4,4,0,0]}/></BarChart></ResponsiveContainer>
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
               <h3 style={{color:C.text,fontWeight:700,margin:"0 0 4px",fontSize:14}}>Monthly Summary</h3>
@@ -4144,7 +3545,7 @@ const Monthly = ({obs,ncr,monthlyState,setMonthlyState,C}) => {
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
             <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>KPI Trend Chart (%)</h3>
             <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={kpiChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={chartTooltip(C)} formatter={v=>`${v}%`}/><Legend/>
+              <LineChart data={kpiChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}} formatter={v=>`${v}%`}/><Legend/>
                 {kpiItems.map((k,i)=><Line key={k} type="monotone" dataKey={k} stroke={KPI_COLORS_PALETTE[i%KPI_COLORS_PALETTE.length]} strokeWidth={2} dot={{r:3}}/>)}
               </LineChart>
             </ResponsiveContainer>
@@ -4206,7 +3607,7 @@ const Monthly = ({obs,ncr,monthlyState,setMonthlyState,C}) => {
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
             <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px"}}>PCI Trend Chart (%)</h3>
             <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={pciChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={chartTooltip(C)} formatter={v=>`${v}%`}/><Legend/>
+              <LineChart data={pciChartData}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted}}/><YAxis domain={[0,100]} tick={{fill:C.muted}} unit="%"/><Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}} formatter={v=>`${v}%`}/><Legend/>
                 {pciItems.map((k,i)=><Line key={k} type="monotone" dataKey={k} stroke={KPI_COLORS_PALETTE[i%KPI_COLORS_PALETTE.length]} strokeWidth={2} dot={{r:3}}/>)}
               </LineChart>
             </ResponsiveContainer>
@@ -4278,7 +3679,7 @@ const Welfare = ({welfareItems,setWelfareItems,C}) => {
           <RadarChart data={welfareItems.map(w=>({subject:w.category.split(" ")[0],A:w.score}))}>
             <PolarGrid stroke={C.border}/><PolarAngleAxis dataKey="subject" tick={{fill:C.sub,fontSize:11}}/><PolarRadiusAxis domain={[0,100]} tick={{fill:C.muted,fontSize:10}}/>
             <Radar name="Score" dataKey="A" stroke={C.purple} fill={C.purple} fillOpacity={0.3}/>
-            <Tooltip contentStyle={chartTooltip(C)}/>
+            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
           </RadarChart>
         </ResponsiveContainer>
       </div>
@@ -4412,11 +3813,13 @@ const UserMgmt = ({firestoreUsers,setFirestoreUsers,userRole,C}) => {
         </div>
       )}
 
-      <PillGrid minWidth={130}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
         {[["Total",firestoreUsers.length,C.blue],["Admins",firestoreUsers.filter(u=>u.role==="admin").length,C.red],["Editors",firestoreUsers.filter(u=>u.role==="editor").length,C.orange],["Viewers",firestoreUsers.filter(u=>u.role==="viewer").length,C.teal]].map(([l,v,c])=>(
-          <StatPill key={l} label={l} value={v} color={c} C={C}/>
+          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
+            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div><div style={{color:"#94a3b8",fontSize:11}}>{l}</div>
+          </div>
         ))}
-      </PillGrid>
+      </div>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,alignItems:"center"}}>
         <span style={{color:C.muted,fontSize:11}}>Role: <strong style={{color:userRole==="admin"?C.green:C.orange}}>{userRole||"unknown"}</strong></span>
         {userRole==="admin"&&<Btn onClick={openAdd} color={C.blue}><Plus size={14}/>Add User</Btn>}
@@ -4524,34 +3927,11 @@ const DropdownSettings = ({
   // Save a single list to Firestore
   const save=async(key,list)=>{await saveSettings({[key]:list});};
 
-  // Bulk-aware list editor.
-  //  • Type one item and press Enter → adds that item.
-  //  • Paste multi-line text (one item per line) and press Enter or click Add
-  //    → parses every line, trims whitespace, skips blanks, removes
-  //      case-insensitive duplicates (against existing items AND within the
-  //      pasted set), then merges and sorts alphabetically A–Z.
-  //  • Shift+Enter inserts a newline so you can keep typing more items.
   const ListEditor=({title,color,items,setItems,firestoreKey,valKey,placeholder})=>{
-    // Normalise + dedupe + sort a candidate list, preserving the first-seen
-    // casing for any pair that collides only in case.
-    const mergeAndSort=(existing, incoming)=>{
-      const seen=new Map(); // lowercased → original casing
-      [...existing, ...incoming].forEach(raw=>{
-        const s=String(raw||"").trim();
-        if(!s) return;
-        const key=s.toLowerCase();
-        if(!seen.has(key)) seen.set(key, s);
-      });
-      return Array.from(seen.values()).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:"base"}));
-    };
-
     const add=()=>{
-      const raw=v(valKey);
-      if(!raw||!raw.trim()) return;
-      // Split on newlines, commas, or semicolons so common paste styles Just Work.
-      const parts=raw.split(/[\r\n,;]+/);
-      const updated=mergeAndSort(items, parts);
-      if(updated.length===items.length) { sv(valKey,""); return; } // nothing new
+      const val=v(valKey).trim();
+      if(!val||items.includes(val))return;
+      const updated=[...items,val];
       setItems(updated);
       save(firestoreKey,updated);
       sv(valKey,"");
@@ -4561,46 +3941,15 @@ const DropdownSettings = ({
       setItems(updated);
       save(firestoreKey,updated);
     };
-    const sortNow=()=>{
-      const updated=mergeAndSort(items, []);
-      if(JSON.stringify(updated)===JSON.stringify(items)) return;
-      setItems(updated);
-      save(firestoreKey,updated);
-    };
-
-    // Detect whether the current input is a multi-line paste so we can show
-    // a "N items to add" preview in the button.
-    const rawVal=v(valKey)||"";
-    const pendingCount=rawVal.trim()
-      ? rawVal.split(/[\r\n,;]+/).map(s=>s.trim()).filter(Boolean).length
-      : 0;
-
     return(
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8,flexWrap:"wrap"}}>
-          <div style={{color:C.text,fontWeight:700,fontSize:13}}>{title}</div>
-          {items.length>1&&(
-            <button onClick={sortNow} title="Re-sort alphabetically A–Z"
-              style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",color:C.muted,fontSize:10,cursor:"pointer"}}>
-              ↕ Sort A–Z
-            </button>
-          )}
-        </div>
-        <div style={{display:"flex",gap:8,marginBottom:6,alignItems:"flex-start"}}>
-          <textarea value={rawVal}
-            onChange={e=>sv(valKey,e.target.value)}
-            onKeyDown={e=>{
-              if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); add(); }
-            }}
-            rows={2}
-            placeholder={placeholder||"Add one item, or paste a list (one item per line)…"}
-            style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none",fontFamily:"inherit",resize:"vertical",minHeight:36}}/>
-          <Btn onClick={add} color={color} disabled={pendingCount===0}>
-            <Plus size={13}/>{pendingCount>1?`Add ${pendingCount}`:"Add"}
-          </Btn>
-        </div>
-        <div style={{color:C.muted,fontSize:10,marginBottom:10,lineHeight:1.5}}>
-          Enter = add · Shift+Enter = new line · Paste multiple lines to bulk-add. Duplicates &amp; blanks are skipped; list stays sorted A–Z.
+        <div style={{color:C.text,fontWeight:700,fontSize:13,marginBottom:12}}>{title}</div>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <input value={v(valKey)} onChange={e=>sv(valKey,e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&add()}
+            placeholder={placeholder||"Add new item..."}
+            style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none"}}/>
+          <Btn onClick={add} color={color} disabled={!v(valKey).trim()}><Plus size={13}/>Add</Btn>
         </div>
         <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
           {items.map(item=>(
@@ -4685,6 +4034,7 @@ const DropdownSettings = ({
 
 // ── PPT GENERATOR ─────────────────────────────────────────────────────────────
 // Runs entirely in browser — loads pptxgenjs from CDN, renders charts via Canvas API
+// eslint-disable-next-line no-unused-vars
 const generatePPT = async (data) => {
   const { obs, ncr, kpis, manualStats, weeklyData } = data;
 
@@ -5179,6 +4529,7 @@ const MonthlyForSite = ({siteId, settingsKey, obs, ncr, C}) => {
       }
     });
     return()=>unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   },[settingsKey]);
 
   const save=async(newState)=>{
@@ -5192,12 +4543,13 @@ const MonthlyForSite = ({siteId, settingsKey, obs, ncr, C}) => {
 // ── SITE DASHBOARD — reusable for Site 1 & Site 2 ────────────────────────────
 // Receives siteId ("Site 1" or "Site 2"), filters all data to that site,
 // and renders a full HSSE dashboard with the same sections as the main app.
-const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSeverity, ncrCats, ncrSeverity, ncrStatus, riskCats, riskStatus, equipStatus, mpStatus, risks, ltiResetDate, incidents=[], globalManualStats={}, C}) => {
+const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSeverity, ncrCats, ncrSeverity, ncrStatus, riskCats, riskStatus, equipStatus, mpStatus, risks, ltiResetDate, incidents=[], C}) => {
   const site        = SITES.find(s=>s.id===siteId)||SITES[0];
   const siteIncidents = (incidents||[]).filter(i=>!i.site||i.site===siteId);
   const autoLTI     = ltiResetDate
     ? Math.floor((new Date()-new Date(ltiResetDate))/(1000*60*60*24))
     : null;
+  // eslint-disable-next-line no-unused-vars
   const role        = ROLE_META[userProfile.role]||ROLE_META.viewer;
   const [activeTab,setActiveTab] = useState("overview");
   const [siteObs,setSiteObs]     = useState([]);
@@ -5237,29 +4589,20 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
       }),
     ];
     return()=>unsubs.forEach(u=>u());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   },[siteId]);
 
   useEffect(()=>{if(!editStats)setDraft({...siteStats});},[siteStats,editStats]);
 
   const saveStats=async()=>{
     setSaving(true);
-    try{
-      await setDoc(doc(db,"settings",settingsKey),{stats:draft},{merge:true});
-      setEditStats(false);
-    }catch(e){
-      console.error("[HSSE] saveStats failed:",e);
-      try{ window.alert(`⚠️ Stats could not be saved: ${e?.message||"Unknown error"}`); }catch{}
-    }finally{ setSaving(false); }
+    await setDoc(doc(db,"settings",settingsKey),{stats:draft},{merge:true});
+    setSaving(false);setEditStats(false);
   };
 
   const saveWelfare=async(items)=>{
     setWelfareItems(items);
-    try{
-      await setDoc(doc(db,"settings",settingsKey),{welfare:items},{merge:true});
-    }catch(e){
-      console.error("[HSSE] saveWelfare failed:",e);
-      try{ window.alert(`⚠️ Welfare could not be saved: ${e?.message||"Unknown error"}`); }catch{}
-    }
+    await setDoc(doc(db,"settings",settingsKey),{welfare:items},{merge:true});
   };
 
   const tabs=[
@@ -5284,43 +4627,6 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
 
   // Fake user scoped to this site for sub-components
   const siteUser      = {...userProfile, site:siteId};
-
-  // ── Strictly site-specific display stats ─────────────────────────────────
-  // Each site's Project Statistics block MUST be independent: Palm1's numbers
-  // must not leak into Palm2 or Site 3 and vice-versa. We only use the live
-  // siteMp count as a fallback for the Manpower card (that is site-specific
-  // data pulled from the per-site manpower table, not a global value).
-  const gm = globalManualStats || {};
-  const displayStats = {
-    daysLTI:         Number(siteStats.daysLTI)         || 0,
-    manpower:        Number(siteStats.manpower)        || (siteMp||[]).length || 0,
-    manhoursWeek:    Number(siteStats.manhoursWeek)    || 0,
-    manhoursMonth:   Number(siteStats.manhoursMonth)   || 0,
-    manhoursYear:    Number(siteStats.manhoursYear)    || 0,
-    manhoursProject: Number(siteStats.manhoursProject) || 0,
-    safetyOfficers:  Number(siteStats.safetyOfficers)  || 0,
-    firstAiders:     Number(siteStats.firstAiders)     || 0,
-    tbtAttendees:    Number(siteStats.tbtAttendees)    || 0,
-  };
-  // prefillStats is ONLY used to pre-populate the Edit Stats form when the
-  // admin opens it for the first time on a site that has no saved values.
-  // It is never displayed on the dashboard.
-  const prefillStats = {
-    daysLTI:         Number(siteStats.daysLTI)         || Number(gm.daysLTI)         || 0,
-    manpower:        Number(siteStats.manpower)        || Number(gm.manpower)        || (siteMp||[]).length || 0,
-    manhoursWeek:    Number(siteStats.manhoursWeek)    || Number(gm.manhoursWeek)    || 0,
-    manhoursMonth:   Number(siteStats.manhoursMonth)   || Number(gm.manhoursMonth)   || 0,
-    manhoursYear:    Number(siteStats.manhoursYear)    || Number(gm.manhoursYear)    || 0,
-    manhoursProject: Number(siteStats.manhoursProject) || Number(gm.manhoursProject) || 0,
-    safetyOfficers:  Number(siteStats.safetyOfficers)  || Number(gm.safetyOfficers)  || 0,
-    firstAiders:     Number(siteStats.firstAiders)     || Number(gm.firstAiders)     || 0,
-    tbtAttendees:    Number(siteStats.tbtAttendees)    || Number(gm.tbtAttendees)    || 0,
-  };
-  // True when the site has no saved manual stats at all (ignoring the live
-  // manpower count fallback which isn't a "manual" stat).
-  const statsEmpty = !Object.entries(siteStats).some(
-    ([k,v]) => k !== "manpower" && Number(v) > 0
-  ) && !Number(siteStats.manpower);
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
@@ -5359,18 +4665,22 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
           <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
             {editStats
               ?<><Btn onClick={saveStats} color={C.green} disabled={saving}><Save size={13}/>{saving?"Saving...":"Save Stats"}</Btn>
-                 <Btn onClick={()=>{setDraft({...displayStats});setEditStats(false);}} color={C.muted} style={{background:C.border}}>Cancel</Btn></>
-              :<Btn onClick={()=>{setDraft(statsEmpty?{...prefillStats}:{...displayStats});setEditStats(true);}} color={C.blue}><Edit2 size={13}/>Edit Stats</Btn>}
+                 <Btn onClick={()=>{setDraft({...siteStats});setEditStats(false);}} color={C.muted} style={{background:C.border}}>Cancel</Btn></>
+              :<Btn onClick={()=>{setDraft({...siteStats});setEditStats(true);}} color={C.blue}><Edit2 size={13}/>Edit Stats</Btn>}
           </div>
           {editStats&&(
             <div style={{background:C.card,border:`1px solid ${accent}44`,borderRadius:14,padding:18}}>
               <div style={{color:C.text,fontWeight:700,fontSize:13,marginBottom:12}}>📝 Edit {site.name} Manual Statistics</div>
-              <ManualStatsEditor draft={draft} setDraft={setDraft} C={C} minWidth={180}/>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+                {[["Days Without LTI","daysLTI"],["Manpower","manpower"],["Man-hours (Week)","manhoursWeek"],["Man-hours (Month)","manhoursMonth"],["Man-hours (Year)","manhoursYear"],["Man-hours (Project)","manhoursProject"],["Safety Officers","safetyOfficers"],["First Aiders","firstAiders"],["TBT Attendees","tbtAttendees"]].map(([l,k])=>(
+                  <Field key={k} label={l} C={C}><Inp C={C} type="number" value={draft[k]||0} onChange={e=>setDraft(p=>({...p,[k]:Number(e.target.value)}))}/></Field>
+                ))}
+              </div>
             </div>
           )}
           {/* Stat cards */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(155px,1fr))",gap:10}}>
-            <StatBox label="Days Without LTI"   value={autoLTI!==null?autoLTI:(displayStats.daysLTI||0)}  color={C.green}  icon={CheckCircle2} sub={autoLTI!==null?"Auto-computed":(statsEmpty?"Not set — click Edit Stats":"Set in Dropdown Settings")} C={C}/>
+            <StatBox label="Days Without LTI"   value={autoLTI!==null?autoLTI:(siteStats.daysLTI||0)}    color={C.green}  icon={CheckCircle2} sub={autoLTI!==null?"Auto-computed":"Set in Dropdown Settings"} C={C}/>
             <StatBox label="Open Observations"  value={(siteObs||[]).filter(o=>o.status==="Open").length}       color={C.orange} icon={Eye}          sub="Live"          C={C}/>
             <StatBox label="Critical NCRs"      value={(siteNcr||[]).filter(n=>n.severity==="Critical").length} color={C.red}    icon={AlertOctagon} sub="Live"          C={C}/>
             <StatBox label="Near Misses"        value={(siteObs||[]).filter(o=>o.type==="Near Miss").length}    color={C.yellow} icon={AlertTriangle} sub="Live"         C={C}/>
@@ -5379,11 +4689,14 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
           </div>
           {/* Manhours grid */}
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
-            <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12,display:"flex",alignItems:"center",flexWrap:"wrap",gap:6}}>
-              <span>📋 {site.name} — Project Statistics</span>
-              {statsEmpty && <span style={{color:C.muted,fontSize:11,fontWeight:500}}>(no site-specific stats yet — click "Edit Stats" to set values for this project)</span>}
+            <div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>📋 {site.name} — Project Statistics</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(185px,1fr))",gap:10}}>
+              {[["👷 Manpower",(siteStats.manpower||0).toLocaleString(),C.purple],["⏱ Man-hours (Week)",(siteStats.manhoursWeek||0).toLocaleString(),C.teal],["📅 Man-hours (Month)",(siteStats.manhoursMonth||0).toLocaleString(),C.blue],["📆 Man-hours (Year)",(siteStats.manhoursYear||0).toLocaleString(),C.indigo],["🏗 Man-hours (Project)",(siteStats.manhoursProject||0).toLocaleString(),C.green],["👮 Safety Officers",siteStats.safetyOfficers||0,C.blue],["🏥 First Aiders",siteStats.firstAiders||0,C.orange],["📢 TBT Attendees",(siteStats.tbtAttendees||0).toLocaleString(),C.teal]].map(([l,v,c])=>(
+                <div key={l} style={{background:c+"11",border:`1px solid ${c}33`,borderRadius:10,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{color:C.sub,fontSize:12}}>{l}</span><span style={{color:c,fontWeight:800,fontSize:14}}>{v}</span>
+                </div>
+              ))}
             </div>
-            <ProjectStatsGrid stats={displayStats} C={C} minWidth={185}/>
           </div>
           {/* Charts row */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
@@ -5395,7 +4708,7 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
                     cx="50%" cy="50%" innerRadius={45} outerRadius={70} dataKey="value" paddingAngle={4}>
                     {[C.red,C.green,C.blue].map((c,i)=><Cell key={i} fill={c}/>)}
                   </Pie>
-                  <Tooltip contentStyle={chartTooltip(C)}/><Legend/>
+                  <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/><Legend/>
                 </PieChart>
               </ResponsiveContainer>
             </div>
@@ -5405,7 +4718,7 @@ const SiteDashboard = ({siteId, userProfile, zones, obsTypes, actionsList, obsSe
                 <BarChart data={[{name:"Critical",v:(siteNcr||[]).filter(n=>n.severity==="Critical").length},{name:"Major",v:(siteNcr||[]).filter(n=>n.severity==="Major").length},{name:"Minor",v:(siteNcr||[]).filter(n=>n.severity==="Minor").length}]}>
                   <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
                   <XAxis dataKey="name" tick={{fill:C.muted,fontSize:11}}/><YAxis tick={{fill:C.muted}}/>
-                  <Tooltip contentStyle={chartTooltip(C)}/>
+                  <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8}}/>
                   <Bar dataKey="v" radius={[4,4,0,0]}>{[C.red,C.orange,C.yellow].map((c,i)=><Cell key={i} fill={c}/>)}</Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -5502,6 +4815,7 @@ const Resources = ({user,equipStatus=DEFAULT_EQUIP_STATUS,mpStatus=DEFAULT_MP_ST
   const [activeTab,setActiveTab]=useState("equipment");
   const [equipment,setEquipment]=useState([]);
   const [manpower,setManpower]=useState([]);
+  // eslint-disable-next-line no-unused-vars
   const [loading,setLoading]=useState(true);
   const [showForm,setShowForm]=useState(false);
   const [uploading,setUploading]=useState(false);
@@ -5860,14 +5174,12 @@ const Resources = ({user,equipStatus=DEFAULT_EQUIP_STATUS,mpStatus=DEFAULT_MP_ST
           ))}
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-          {can(user,activeTab==="equipment"?"equipment":"manpower",user.site,"add")&&(
-            <label style={{background:C.green,color:"#fff",borderRadius:8,padding:"6px 12px",fontWeight:700,fontSize:12,cursor:uploading?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5,opacity:uploading?0.6:1}}>
-              <Download size={12}/>{uploading?"Importing...":"📥 Import Excel"}
-              <input type="file" accept=".xlsx,.xls" onChange={e=>handleBulkImport(e,activeTab)} style={{display:"none"}} disabled={uploading}/>
-            </label>
-          )}
+          <label style={{background:C.green,color:"#fff",borderRadius:8,padding:"6px 12px",fontWeight:700,fontSize:12,cursor:uploading?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5,opacity:uploading?0.6:1}}>
+            <Download size={12}/>{uploading?"Importing...":"📥 Import Excel"}
+            <input type="file" accept=".xlsx,.xls" onChange={e=>handleBulkImport(e,activeTab)} style={{display:"none"}} disabled={uploading}/>
+          </label>
           <Btn onClick={()=>exportCSV(activeTab==="equipment"?equipment:manpower,activeTab)} color={C.indigo}><Download size={13}/>CSV</Btn>
-          {can(user,activeTab==="equipment"?"equipment":"manpower",user.site,"add")&&<Btn onClick={()=>setShowForm(true)} color={activeTab==="equipment"?C.teal:C.purple}><Plus size={13}/>Add {activeTab==="equipment"?"Equipment":"Worker"}</Btn>}
+          {role.canAdd&&<Btn onClick={()=>setShowForm(true)} color={activeTab==="equipment"?C.teal:C.purple}><Plus size={13}/>Add {activeTab==="equipment"?"Equipment":"Worker"}</Btn>}
         </div>
       </div>
 
@@ -6087,32 +5399,10 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
     return Math.ceil((d - today) / (1000*60*60*24));
   };
 
-  // ── localStorage fallback for EmailJS config ──────────────────────────────
-  // We persist a copy of the config locally as a safety net. If the Neon write
-  // ever fails silently (network blip, permission issue, cold-start timeout),
-  // the user still has their credentials on next page load and does NOT have
-  // to re-enter them. The localStorage copy and the DB copy are kept in sync.
-  const EJS_LS_KEY = "hsse_emailjs_cfg";
-  const loadCfgFromLocal = () => {
-    try {
-      const raw = localStorage.getItem(EJS_LS_KEY);
-      if (!raw) return null;
-      const v = JSON.parse(raw);
-      // Only trust the local copy if it has the three required fields
-      if (v && v.serviceId && v.templateId && v.publicKey) return v;
-      return null;
-    } catch { return null; }
-  };
-  const saveCfgToLocal = (cfg) => {
-    try { localStorage.setItem(EJS_LS_KEY, JSON.stringify(cfg)); } catch {}
-  };
-  const initLocal = loadCfgFromLocal();
   // ── State ─────────────────────────────────────────────────────────────────
-  const [ejsConfig,setEjsConfig]     = useState(initLocal || {serviceId:"",templateId:"",publicKey:"",expiryDays:30});
-  const [savedCfg,setSavedCfg]       = useState(initLocal || null);
+  const [ejsConfig,setEjsConfig]     = useState({serviceId:"",templateId:"",publicKey:"",expiryDays:30});
+  const [savedCfg,setSavedCfg]       = useState(null);
   const [editCfg,setEditCfg]         = useState(false);
-  const [cfgSaveError,setCfgSaveError] = useState(null);
-  const [cfgSaving,setCfgSaving]       = useState(false);
   // eslint-disable-next-line no-unused-vars
   const [sending,setSending]         = useState(false);
   const [sendingId,setSendingId]     = useState(null);
@@ -6134,94 +5424,26 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
   const [digestResult,setDigestResult]   = useState(null);
   const [previewOpen,setPreviewOpen]     = useState(false);
 
-  // ── Load EmailJS config from Neon (live) ─────────────────────────────────
-  // The DB listener polls every 15 seconds. We MUST NOT let that poll touch
-  // the form's ejsConfig state while the user is typing — otherwise their
-  // in-progress input gets wiped when the next poll returns an empty/partial
-  // row from the DB. Rules:
-  //   1. Populate ejsConfig from the DB exactly once, on the first snapshot,
-  //      and only if localStorage didn't already pre-fill the form.
-  //   2. savedCfg (the "is it ready?" signal) can be updated on every poll —
-  //      that doesn't interfere with the form inputs.
-  //   3. When the user clicks Save, saveCfg() writes to ejsConfig locally so
-  //      no further DB->form sync is ever needed.
-  const hasPopulatedFormFromDB = useRef(false);
+  // ── Load EmailJS config from Firestore (live) ────────────────────────────
   useEffect(()=>{
     const unsub = onSnapshot(doc(db,"settings","emailAlerts"), snap=>{
       if(snap.exists()){
         const d = snap.data();
-        setSavedCfg(prev => ({...(prev||{}), ...d}));
-        // FIRST snapshot only — and only if no localStorage pre-fill happened.
-        // Any later poll must leave ejsConfig alone so typing isn't clobbered.
-        if (!hasPopulatedFormFromDB.current) {
-          hasPopulatedFormFromDB.current = true;
-          if (!initLocal) {
-            setEjsConfig({
-              serviceId:  d.serviceId  || "",
-              templateId: d.templateId || "",
-              publicKey:  d.publicKey  || "",
-              expiryDays: d.expiryDays || 30,
-            });
-          }
-        }
+        setSavedCfg(d);
+        setEjsConfig({serviceId:d.serviceId||"",templateId:d.templateId||"",publicKey:d.publicKey||"",expiryDays:d.expiryDays||30});
         if(d.recipientList) setRecipientList(d.recipientList);
         if(d.lastSent) setLastSent(d.lastSent);
-        // Keep localStorage in sync with DB so the two never diverge
-        if (d.serviceId && d.templateId && d.publicKey) {
-          saveCfgToLocal({
-            serviceId:  d.serviceId,
-            templateId: d.templateId,
-            publicKey:  d.publicKey,
-            expiryDays: d.expiryDays || 30,
-          });
-        }
-      } else {
-        // No DB row yet — first-snapshot "done" so future polls also skip.
-        hasPopulatedFormFromDB.current = true;
       }
       setCfgLoading(false);
     });
     return()=>unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
   const saveCfg = async () => {
-    // Validate before saving — don't let the user save an incomplete config
-    if (!ejsConfig.serviceId || !ejsConfig.templateId || !ejsConfig.publicKey) {
-      setCfgSaveError("Please fill in Service ID, Template ID, and Public Key before saving.");
-      return;
-    }
-    setCfgSaving(true);
-    setCfgSaveError(null);
     const data = {...ejsConfig, recipientList};
-    // Step 1 — write to localStorage immediately (synchronous, can't fail).
-    // This is the safety net: even if the DB write fails, the credentials
-    // persist on this browser across refreshes.
-    saveCfgToLocal({
-      serviceId:  ejsConfig.serviceId,
-      templateId: ejsConfig.templateId,
-      publicKey:  ejsConfig.publicKey,
-      expiryDays: ejsConfig.expiryDays || 30,
-    });
-    // Step 2 — try to write to Neon. If this fails, we surface the error but
-    // we do NOT roll back the local save — the user's credentials survive.
-    try {
-      await setDoc(doc(db,"settings","emailAlerts"), data, {merge:true});
-      setSavedCfg(data);
-      setEditCfg(false);
-    } catch (e) {
-      // DB write failed — tell the user, but leave the form open so they can
-      // retry. Local copy has already been saved, so even a refresh won't
-      // lose their input.
-      console.error("[HSSE] EmailJS config save failed:", e);
-      setSavedCfg(data); // treat as saved locally
-      setCfgSaveError(
-        `Saved locally on this browser, but the server copy failed: ${e.message}. ` +
-        `Your credentials will still work here — retry later to sync to other browsers.`
-      );
-    } finally {
-      setCfgSaving(false);
-    }
+    await setDoc(doc(db,"settings","emailAlerts"), data, {merge:true});
+    setSavedCfg(data);
+    setEditCfg(false);
   };
 
   const saveRecipients = async (list) => {
@@ -6451,14 +5673,19 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
   const warnCount    = deduped.filter(a=>a.severity==="Expiring"||a.severity==="Overdue"||a.severity==="High"||a.severity==="Due Soon").length;
   const recipCount   = activeRecips.length;
 
-  // ── EmailJS init ──────────────────────────────────────────────────────────
-  // The SDK is bundled with the app (see `import emailjs` at top of file), so
-  // there is no runtime script download, no CDN dependency, and no CSP
-  // script-src exception needed. We only need to init with the current public
-  // key before each send (safe to call multiple times).
+  // ── EmailJS loader ────────────────────────────────────────────────────────
   const loadEmailJS = async () => {
-    if(!savedCfg?.publicKey) throw new Error("EmailJS Public Key not configured.");
-    emailjs.init({publicKey: savedCfg.publicKey});
+    // Load script only if not already loaded
+    if(!window.emailjs){
+      await new Promise((res,rej)=>{
+        const s=document.createElement("script");
+        s.src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js";
+        s.onload=res; s.onerror=()=>rej(new Error("Failed to load EmailJS script. Check your internet connection."));
+        document.head.appendChild(s);
+      });
+    }
+    // Always re-init with current public key (v4 API requires object)
+    window.emailjs.init({publicKey: savedCfg.publicKey});
   };
 
   // ── Build formatted email body ────────────────────────────────────────────
@@ -6493,38 +5720,14 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
       return `${g.total} ${cat}: ${parts.join(", ")}`;
     }).join("\n");
 
-    // ── Severity totals (single source of truth) ───────────────────────────
-    // Counted once here and re-used in both the breakdown text and the per-
-    // recipient EmailJS params — so the numbers on the "Critical/Overdue/
-    // Expiring" tiles in the email can never drift from the body.
-    const totalCrit     = deduped.filter(a=>a.severity==="Critical"||a.severity==="Expired").length;
-    const totalWarn     = deduped.filter(a=>a.severity==="Expiring"||a.severity==="Overdue"||a.severity==="High"||a.severity==="Due Soon").length;
-    const totalOther    = deduped.length - totalCrit - totalWarn;
-    const totalOverdue  = deduped.filter(a=>a.severity==="Overdue").length;
-    const totalExpiring = deduped.filter(a=>a.severity==="Expiring"||a.severity==="Due Soon").length;
+    const totalCrit  = deduped.filter(a=>a.severity==="Critical"||a.severity==="Expired").length;
+    const totalWarn  = deduped.filter(a=>a.severity==="Expiring"||a.severity==="Overdue"||a.severity==="High"||a.severity==="Due Soon").length;
+    const totalOther = deduped.length - totalCrit - totalWarn;
 
-    // ── Build per-category breakdown lines once ────────────────────────────
-    const categoryLines = Object.entries(groups).map(([cat,g])=>{
-      const parts=[];
-      if(g.expired)  parts.push(`${g.expired} Expired`);
-      if(g.expiring) parts.push(`${g.expiring} Expiring`);
-      if(g.critical) parts.push(`${g.critical} Critical`);
-      if(g.overdue)  parts.push(`${g.overdue} Overdue`);
-      if(g.dueSoon)  parts.push(`${g.dueSoon} Due Soon`);
-      if(g.high)     parts.push(`${g.high} High`);
-      if(g.pending)  parts.push(`${g.pending} Pending`);
-      return `  ${cat.padEnd(24)} ${String(g.total).padStart(4)}   (${parts.join(", ")})`;
-    });
-
-    // ── Per-recipient body builder ─────────────────────────────────────────
-    // IMPORTANT: EmailJS does NOT recursively interpolate Handlebars inside an
-    // already-substituted variable. If we drop `Dear {{to_name}},` into the
-    // `alerts` payload, the email shows the literal text `{{to_name}}`. So we
-    // interpolate the recipient's name in JavaScript BEFORE sending — and we
-    // leave it to the EmailJS template's own `{{to_name}}` slot to handle
-    // greetings outside the body.
-    const buildBody = (toName) => [
-      `Dear ${toName},`,
+    // breakdown receives to_name from EmailJS template — greeting uses {{to_name}}
+    // Data body: counts only, no names from files
+    const breakdown = [
+      `Dear {{to_name}},`,
       ``,
       `Please find below this week's HSSE alert summary for your action.`,
       ``,
@@ -6538,7 +5741,17 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
       ``,
       `BREAKDOWN BY CATEGORY:`,
       `─────────────────────────────────────────────────────`,
-      ...categoryLines,
+      ...Object.entries(groups).map(([cat,g])=>{
+        const parts=[];
+        if(g.expired)  parts.push(`${g.expired} Expired`);
+        if(g.expiring) parts.push(`${g.expiring} Expiring`);
+        if(g.critical) parts.push(`${g.critical} Critical`);
+        if(g.overdue)  parts.push(`${g.overdue} Overdue`);
+        if(g.dueSoon)  parts.push(`${g.dueSoon} Due Soon`);
+        if(g.high)     parts.push(`${g.high} High`);
+        if(g.pending)  parts.push(`${g.pending} Pending`);
+        return `  ${cat.padEnd(24)} ${String(g.total).padStart(4)}   (${parts.join(", ")})`;
+      }),
       `─────────────────────────────────────────────────────`,
       ``,
       `Please log in to the HSSE System to review and take action.`,
@@ -6548,17 +5761,7 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
       `DAN Company HSSE Management System`,
     ].join("\n");
 
-    return {
-      headline,
-      buildBody,
-      total: deduped.length,
-      groups,
-      totalCrit,
-      totalWarn,
-      totalOther,
-      totalOverdue,
-      totalExpiring,
-    };
+    return {headline, breakdown, total:deduped.length, groups};
   };
 
   // ── Send weekly digest to all active recipients ───────────────────────────
@@ -6569,29 +5772,27 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
     setSendingDigest(true); setDigestResult(null);
     try{
       await loadEmailJS();
-      const digest = buildDigest();
-      const {headline, buildBody, total, totalCrit, totalOverdue, totalExpiring} = digest;
+      // eslint-disable-next-line no-unused-vars
+      const {headline,breakdown,total,groups} = buildDigest();
       const recipients = activeRecips.map(r=>({email:r.email,name:r.name}));
       const sentDate = new Date().toISOString();
-      const subject  = `HSSE Weekly Summary - ${total} items require attention [${today.toDateString()}]`;
       let sent=0, failed=0, lastError="";
       for(const to of recipients){
-        const toName = to.name || to.email.split("@")[0];
         try{
           const params = {
             to_email:    to.email,
-            to_name:     toName,
-            subject,
-            alerts:      buildBody(toName),   // name interpolated in JS — not via {{to_name}}
+            to_name:     to.name||to.email.split("@")[0],
+            subject:     `HSSE Weekly Summary - ${total} items require attention [${today.toDateString()}]`,
+            alerts:      breakdown,
             alert_count: String(total),
             alert_date:  today.toDateString(),
-            critical:    String(totalCrit),
-            overdue:     String(totalOverdue),
-            expiring:    String(totalExpiring),
+            critical:    String(deduped.filter(a=>a.severity==="Critical"||a.severity==="Expired").length),
+            overdue:     String(deduped.filter(a=>a.severity==="Overdue").length),
+            expiring:    String(deduped.filter(a=>a.severity==="Expiring"||a.severity==="Due Soon").length),
             project:     "DAN Company - HSSE Management System",
-            headline,
+            headline:    headline,
           };
-          const resp = await emailjs.send(savedCfg.serviceId, savedCfg.templateId, params);
+          const resp = await window.emailjs.send(savedCfg.serviceId, savedCfg.templateId, params);
           console.log("EmailJS send response:", resp);
           sent++;
         }catch(e){
@@ -6613,59 +5814,27 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
   // ── Send to individual responsible person ─────────────────────────────────
   const sendToResponsible = async (alert) => {
     if(!alert.assigneeEmail){
-      window.alert(`No email found for "${alert.assignee}" in the system.\nAdd their email in User Management first.`);
+      alert(`No email found for "${alert.assignee}" in the system.\nAdd their email in User Management first.`);
       return;
     }
-    if(!isReady){window.alert("Configure EmailJS settings first.");return;}
+    if(!isReady){alert("Configure EmailJS settings first.");return;}
     setSendingId(alert.key);
     try{
       await loadEmailJS();
-      const toName = alert.assignee || (alert.assigneeEmail||"").split("@")[0];
-      // Body — built the same way buildDigest.buildBody is, so any template
-      // that renders {{alerts}} as a <pre> block or white-space:pre-wrap gets
-      // consistent formatting between weekly digest and single-item alerts.
-      const daysText = alert.daysLeft==null
-        ? ""
-        : (alert.daysLeft<0 ? `OVERDUE (${Math.abs(alert.daysLeft)}d)` : `${alert.daysLeft}d`);
-      const body = [
-        `Dear ${toName},`,
-        ``,
-        `The following item requires your action:`,
-        ``,
-        `Title    : ${alert.title}`,
-        alert.category ? `Category : ${alert.category}` : null,
-        alert.severity ? `Severity : ${alert.severity}` : null,
-        alert.due      ? `Due Date : ${alert.due}`      : null,
-        daysText       ? `Remaining: ${daysText}`       : null,
-        ``,
-        alert.detail || "",
-        ``,
-        `Please log in to the HSSE System to review and take action.`,
-        ``,
-        `Regards,`,
-        `DAN Company HSSE Management System`,
-      ].filter(line => line !== null).join("\n");
-
-      // Severity flags — same semantics as sendDigest so the template never
-      // sees "expiring" meaning two different things from two different senders.
-      const isCrit     = alert.severity==="Critical" || alert.severity==="Expired";
-      const isOverdue  = alert.severity==="Overdue";
-      const isExpiring = alert.severity==="Expiring" || alert.severity==="Due Soon";
-
       const respParams = {
-        to_email:    alert.assigneeEmail,
-        to_name:     toName,
-        subject:     `Action Required: ${alert.title}`,
-        alerts:      body,                 // greeting interpolated in JS — NOT {{to_name}}
-        alert_count: "1",
-        alert_date:  today.toDateString(),
-        critical:    isCrit     ? "1" : "0",
-        overdue:     isOverdue  ? "1" : "0",
-        expiring:    isExpiring ? "1" : "0",
-        project:     "DAN Company - HSSE Management System",
-        headline:    alert.title,
+        to_email:   alert.assigneeEmail,
+        to_name:    alert.assignee,
+        subject:    `Action Required: ${alert.title}`,
+        alerts:     `${alert.title}\n\n${alert.detail}${alert.due?`\n\nDue Date: ${alert.due}`:""}${alert.daysLeft!==null?`\nDays Remaining: ${alert.daysLeft<0?"OVERDUE ("+Math.abs(alert.daysLeft)+"d)":alert.daysLeft+"d"}`:""}`,
+        alert_count:"1",
+        alert_date: today.toDateString(),
+        critical:   alert.severity==="Critical"?"1":"0",
+        overdue:    alert.severity==="Overdue"?"1":"0",
+        expiring:   (alert.severity==="Expiring"||alert.severity==="Expired")?"1":"0",
+        project:    "DAN Company - HSSE Management System",
+        headline:   alert.title,
       };
-      const r = await emailjs.send(savedCfg.serviceId, savedCfg.templateId, respParams);
+      const r = await window.emailjs.send(savedCfg.serviceId, savedCfg.templateId, respParams);
       console.log("EmailJS notify response:", r);
       setSendResult({sent:1,failed:0,total:1,personal:alert.assignee});
     }catch(err){setSendResult({error:err.message});}
@@ -6680,16 +5849,19 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
 
       {/* Summary strip */}
-      <PillGrid minWidth={130}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
         {[
-          ["Total Alerts",    deduped.length,  C.blue],
-          ["Critical/Expired",critCount,       C.red],
-          ["Warning",         warnCount,       C.orange],
-          ["Recipients",      recipCount,      C.teal],
+          ["Total Alerts",  deduped.length,        C.blue],
+          ["Critical/Expired",critCount,            C.red],
+          ["Warning",        warnCount,             C.orange],
+          ["Recipients",     recipCount,            C.teal],
         ].map(([l,v,c])=>(
-          <StatPill key={l} label={l} value={v} color={c} C={C}/>
+          <div key={l} style={{background:c+"22",border:`1px solid ${c}44`,borderRadius:10,padding:14,textAlign:"center"}}>
+            <div style={{color:c,fontSize:22,fontWeight:900}}>{v}</div>
+            <div style={{color:C.muted,fontSize:11}}>{l}</div>
+          </div>
         ))}
-      </PillGrid>
+      </div>
 
       {/* EmailJS config panel */}
       <div style={{background:C.card,border:`1px solid ${isReady?C.green+"55":C.orange+"55"}`,borderRadius:14,padding:18}}>
@@ -6740,14 +5912,7 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
             <div style={{marginTop:10,padding:"8px 12px",background:C.blue+"11",border:`1px solid ${C.blue}22`,borderRadius:8,fontSize:11,color:C.blue}}>
               💡 <strong>Send to Responsible:</strong> Add user email addresses in <strong>User Management</strong> to enable the per-row "Send to Responsible" button. The system matches by name.
             </div>
-            {cfgSaveError && (
-              <div style={{marginTop:10,padding:"8px 12px",background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:8,fontSize:12,color:C.red,lineHeight:1.5}}>
-                ⚠ {cfgSaveError}
-              </div>
-            )}
-            <Btn onClick={saveCfg} color={C.teal} style={{marginTop:10}} disabled={cfgSaving}>
-              <Save size={14}/>{cfgSaving ? "Saving..." : "Save Configuration"}
-            </Btn>
+            <Btn onClick={saveCfg} color={C.teal} style={{marginTop:10}}><Save size={14}/>Save Configuration</Btn>
           </div>
         )}
       </div>
@@ -7049,150 +6214,666 @@ const EmailAlerts = ({obs, ncr, equipment, manpower, firestoreUsers, weeklyData,
   );
 };
 // ── ROOT APP wrapped in ErrorBoundary ────────────────────────────────────────
-const AppInner = () => {
-  const [darkMode,setDarkMode]             = useState(true);
-  const [installPrompt,setInstallPrompt]   = useState(null);
-  const [isOnline,setIsOnline]             = useState(navigator.onLine);
-  const [showInstall,setShowInstall]       = useState(false);
 
-  // PWA install prompt
-  useEffect(()=>{
-    window.showInstallButton = (prompt) => { setInstallPrompt(prompt); setShowInstall(true); };
-    const handleOnline  = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener("online",  handleOnline);
-    window.addEventListener("offline", handleOffline);
-    return()=>{
-      window.removeEventListener("online",  handleOnline);
-      window.removeEventListener("offline", handleOffline);
-      delete window.showInstallButton;
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6: PAGES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── HOME PAGE — shows all projects with live KPI cards ────────────────────────
+// KPIs auto-update from project data. "View Project" links to project page.
+// Adding a project to SITES auto-adds it here.
+const HomePage = ({obs, ncr, incidents, appEquipment, appManpower, userProfile, onNavigate, C}) => {
+
+  // ── Compute live KPI score for each site ──────────────────────────────────
+  // KPI score = weighted average of: LTI-free days, obs rate, NCR closure, welfare
+  const computeSiteKpis = (siteId) => {
+    const cfg     = siteById(siteId).kpiConfig;
+    const sObs    = (obs||[]).filter(o => o.site === siteId);
+    const sNcr    = (ncr||[]).filter(n => n.site === siteId);
+    const sInc    = (incidents||[]).filter(i => i.site === siteId);
+    const sEquip  = (appEquipment||[]).filter(e => e.site === siteId);
+    const sMp     = (appManpower||[]).filter(m => m.site === siteId);
+
+    const totalObs  = sObs.length;
+    const openObs   = sObs.filter(o => o.status === "Open").length;
+    const openNcr   = sNcr.filter(n => n.status !== "Closed").length;
+    const ltiCount  = sInc.filter(i => (i.damInjEnv||"") === "LTI").length;
+    const nearMiss  = sObs.filter(o => o.type === "Near Miss").length;
+
+    // HSSE Status: Good / Attention / Critical
+    const status = ltiCount > 0 ? "Critical"
+                 : openNcr > 5  ? "Attention"
+                 : openObs > 50 ? "Attention"
+                 : "Good";
+
+    const statusColor = status === "Critical" ? C.red
+                      : status === "Attention" ? C.orange
+                      : C.green;
+
+    return {
+      totalObs, openObs, openNcr, ltiCount, nearMiss,
+      manpower: sMp.length, equipment: sEquip.length,
+      status, statusColor,
+      // KPI metrics
+      kpis: [
+        { label:"Observations", value:totalObs, target:cfg.obsTarget,     unit:"",    good:"high" },
+        { label:"Open NCRs",    value:openNcr,  target:5,                 unit:"",    good:"low"  },
+        { label:"Near Miss",    value:nearMiss, target:cfg.nearMissTarget, unit:"/mo", good:"low"  },
+        { label:"LTI",          value:ltiCount, target:0,                 unit:"",    good:"low"  },
+        { label:"Manpower",     value:sMp.length, target:cfg.obsTarget,   unit:"",    good:"high" },
+      ],
     };
-  },[]);
-
-  const installPWA = async () => {
-    if(!installPrompt) return;
-    installPrompt.prompt();
-    const result = await installPrompt.userChoice;
-    if(result.outcome==="accepted") setShowInstall(false);
-    setInstallPrompt(null);
   };
 
-  // Session timeout — auto sign-out after 8 hours of inactivity
-  const inactivityTimer = useRef(null);
-  const SESSION_TIMEOUT_MS = 8 * 60 * 60 * 1000; // 8 hours
-  const resetTimer = useCallback(()=>{
-    clearTimeout(inactivityTimer.current);
-    inactivityTimer.current = setTimeout(async()=>{
-      console.warn("[HSSE] Session timed out due to inactivity.");
-      await signOut(auth);
-    }, SESSION_TIMEOUT_MS);
-  },[]);
-  useEffect(()=>{
-    const events=["mousedown","keydown","touchstart","scroll"];
-    events.forEach(e=>window.addEventListener(e,resetTimer,{passive:true}));
-    resetTimer();
-    return()=>{
-      events.forEach(e=>window.removeEventListener(e,resetTimer));
-      clearTimeout(inactivityTimer.current);
-    };
-  },[resetTimer]);
-  const C                                  = darkMode?DARK:LIGHT;
-  const [authUser,setAuthUser]             = useState(null);
-  const [userProfile,setUserProfile]       = useState(null);
-  const [accessDenied,setAccessDenied]     = useState(false);
-  const [deniedEmail,setDeniedEmail]       = useState("");
-  const [showChangePw,setShowChangePw]     = useState(false);
-  const [authLoading,setAuthLoading]       = useState(true);
-  // Default active section based on user's site assignment
-  const getDefaultSection = (profile) => {
-    if(!profile) return "overview";
-    if(profile.role==="admin"||profile.site==="All Sites") return "overview";
-    if(profile.site==="Site 1") return "site1";
-    if(profile.site==="Site 2") return "site2";
-    if(profile.site==="Site 3") return "site3";
-    return "overview";
-  };
-  // ── Hash-based routing ────────────────────────────────────────────────────
-  // Maps URL hash (#/palm1, #/palm2, #/site3, #/home, #/resources, #/users,
-  // #/notifications, #/dropdowns) to internal section IDs, and vice-versa.
-  // This gives us bookmarkable, shareable URLs per page without adding a
-  // router dependency.
-  const HASH_TO_ID = {
-    "home":"overview","overview":"overview",
-    "palm1":"site1","site1":"site1",
-    "palm2":"site2","site2":"site2",
-    "site3":"site3",
-    "resources":"resources","users":"users",
-    "notifications":"notifications","dropdowns":"dropdowns",
-  };
-  const ID_TO_HASH = {
-    "overview":"home","site1":"palm1","site2":"palm2","site3":"site3",
-    "resources":"resources","users":"users",
-    "notifications":"notifications","dropdowns":"dropdowns",
-  };
-  const sectionFromHash = () => {
-    const h = (window.location.hash||"").replace(/^#\/?/,"").toLowerCase();
-    return HASH_TO_ID[h] || null;
-  };
-  const [active,setActive] = useState(() => sectionFromHash() || "overview");
-  const [sideOpen,setSideOpen]             = useState(true);
-  const [dataLoading,setDataLoading]       = useState(true);
-  const [settingsLoading,setSettingsLoading] = useState(true);
-  const [isMobile,setIsMobile]             = useState(window.innerWidth<768);
-  const [obs,setObs]                       = useState([]);
-  const [ncr,setNcr]                       = useState([]);
-  const [risks,setRisks]                   = useState([]);
-  const [appEquipment,setAppEquipment]     = useState([]);
-  const [incidents,setIncidents]           = useState([]);  // incident register
-  const [appManpower,setAppManpower]       = useState([]);
-  const [appLastSent,setAppLastSent]       = useState(null);   // last digest sent date
-  const [firestoreUsers,setFirestoreUsers] = useState([]);
-  const [notifOpen,setNotifOpen]           = useState(false);
-  const [pptGenerating,setPptGenerating]   = useState(false);
-
-  // ── ALL PERSISTED DASHBOARD STATE ────────────────────────────────────────
-  const [zones,setZones]             = useState(DEFAULT_ZONES);
-  const [obsSeverity,setObsSeverity]     = useState(DEFAULT_OBS_SEVERITY);
-  const [ncrCats,setNcrCats]             = useState(DEFAULT_NCR_CATS);
-  const [ncrSeverity,setNcrSeverity]     = useState(DEFAULT_NCR_SEVERITY);
-  const [ncrStatus,setNcrStatus]         = useState(DEFAULT_NCR_STATUS);
-  const [riskCats,setRiskCats]           = useState(DEFAULT_RISK_CATS);
-  const [riskStatus,setRiskStatus]       = useState(DEFAULT_RISK_STATUS);
-  const [equipStatus,setEquipStatus]     = useState(DEFAULT_EQUIP_STATUS);
-  const [mpStatus,setMpStatus]           = useState(DEFAULT_MP_STATUS);
-  const [ltiResetDate,setLtiResetDate]   = useState(null);
-  const [obsTypes,setObsTypes]       = useState(DEFAULT_OBS_TYPES);
-  const [actionsList,setActionsList] = useState(DEFAULT_ACTIONS);
-  const [manualStats,setManualStats] = useState(INIT_MANUAL_STATS);
-  const [kpis,setKpis]               = useState(DEFAULT_KPI_DATA);
   // eslint-disable-next-line no-unused-vars
-  const [radarData,setRadarData]     = useState(DEFAULT_RADAR_DATA);
+  const role = ROLE_META[userProfile?.role] || ROLE_META.viewer;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}}>
+
+      {/* ── Page header ── */}
+      <div style={{background:`linear-gradient(135deg,${C.card},${C.bg})`,border:`1px solid ${C.border}`,borderRadius:16,padding:"24px 28px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:6}}>
+          <div style={{background:"#14b8a633",padding:10,borderRadius:12}}>
+            <Activity size={22} style={{color:"#14b8a6"}}/>
+          </div>
+          <div>
+            <h1 style={{color:C.text,fontWeight:900,fontSize:20,margin:0}}>All Projects Overview</h1>
+            <p style={{color:C.muted,fontSize:12,margin:0}}>DAN Company · HSSE Command Center · {new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"})}</p>
+          </div>
+        </div>
+
+        {/* ── Global stats strip ── */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginTop:16}}>
+          {[
+            ["Total Obs",    (obs||[]).length,                     "#14b8a6"],
+            ["Open NCRs",   (ncr||[]).filter(n=>n.status!=="Closed").length, "#f97316"],
+            ["LTIs",        (incidents||[]).filter(i=>i.damInjEnv==="LTI").length, "#ef4444"],
+            ["Near Miss",   (obs||[]).filter(o=>o.type==="Near Miss").length, "#eab308"],
+            ["Manpower",    (appManpower||[]).length,              "#a855f7"],
+            ["Equipment",   (appEquipment||[]).length,             "#3b82f6"],
+          ].map(([label,value,color])=>(
+            <div key={label} style={{background:color+"15",border:`1px solid ${color}33`,borderRadius:10,padding:"10px 14px",textAlign:"center"}}>
+              <div style={{color,fontSize:20,fontWeight:900}}>{value}</div>
+              <div style={{color:C.muted,fontSize:10,marginTop:2}}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Project cards ── */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(340px,1fr))",gap:16}}>
+        {SITES.map(site => {
+          const kd = computeSiteKpis(site.id);
+          const canAccess = userProfile?.role === "admin" ||
+                            userProfile?.site === "All Sites" ||
+                            userProfile?.site === site.id;
+          return (
+            <div key={site.id} style={{
+              background:C.card,
+              border:`2px solid ${canAccess ? site.color+"44" : C.border}`,
+              borderRadius:16,
+              overflow:"hidden",
+              opacity: canAccess ? 1 : 0.5,
+            }}>
+              {/* Card header */}
+              <div style={{background:`linear-gradient(135deg,${site.color}22,${site.color}08)`,
+                padding:"16px 20px",borderBottom:`1px solid ${site.color}33`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{color:site.color,fontWeight:900,fontSize:15}}>{site.name}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>{site.location}</div>
+                    <div style={{color:C.sub,fontSize:11}}>{site.contractor}</div>
+                  </div>
+                  <div style={{
+                    background:kd.statusColor+"22",
+                    border:`1px solid ${kd.statusColor}44`,
+                    borderRadius:99,padding:"4px 12px",
+                    color:kd.statusColor,fontWeight:700,fontSize:11
+                  }}>
+                    {kd.status}
+                  </div>
+                </div>
+              </div>
+
+              {/* KPI metrics */}
+              <div style={{padding:"14px 20px"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
+                  {kd.kpis.slice(0,3).map(k => {
+                    const good = k.good==="high" ? k.value>=k.target : k.value<=k.target;
+                    return (
+                      <div key={k.label} style={{textAlign:"center",background:C.bg,borderRadius:8,padding:"8px 4px"}}>
+                        <div style={{color:good?C.green:C.orange,fontSize:16,fontWeight:900}}>{k.value}</div>
+                        <div style={{color:C.muted,fontSize:9,marginTop:1}}>{k.label}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Stats row */}
+                <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+                  {[
+                    [`👷 ${kd.manpower}`,  "Manpower"],
+                    [`🏗 ${kd.equipment}`, "Equipment"],
+                    [`⚠️ ${kd.openNcr}`,   "Open NCRs"],
+                  ].map(([val,label])=>(
+                    <div key={label} style={{background:C.bg,borderRadius:6,padding:"4px 10px",fontSize:11,color:C.sub}}>
+                      <span style={{fontWeight:700,color:C.text}}>{val}</span> {label}
+                    </div>
+                  ))}
+                </div>
+
+                {/* View Project button */}
+                <button
+                  onClick={() => canAccess && onNavigate("project", site.key)}
+                  disabled={!canAccess}
+                  style={{
+                    width:"100%",
+                    background:canAccess ? `linear-gradient(135deg,${site.color},${site.color}cc)` : C.border,
+                    color:"#fff",border:"none",borderRadius:10,
+                    padding:"10px 0",fontWeight:700,fontSize:13,
+                    cursor:canAccess?"pointer":"not-allowed",
+                    display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                  }}>
+                  {canAccess ? (
+                    <><ChevronRight size={14}/> View {site.shortName} Project</>
+                  ) : (
+                    <><Lock size={13}/> No Access</>
+                  )}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Combined trend chart ── */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:20}}>
+        <h3 style={{color:C.text,fontWeight:700,margin:"0 0 14px",fontSize:14}}>📈 Combined 6-Month Observation Trend</h3>
+        <ResponsiveContainer width="100%" height={220}>
+          <AreaChart data={(() => {
+            const months = [];
+            for(let i=5;i>=0;i--){
+              const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-i);
+              const yr=d.getFullYear(), mo=d.getMonth();
+              const label=d.toLocaleString("default",{month:"short"});
+              months.push({
+                month: label,
+                ...Object.fromEntries(SITES.map(s=>[
+                  s.shortName,
+                  (obs||[]).filter(o=>o.site===s.id&&new Date(o.date).getFullYear()===yr&&new Date(o.date).getMonth()===mo).length
+                ]))
+              });
+            }
+            return months;
+          })()}>
+            <defs>
+              {SITES.map((s,i)=>(
+                <linearGradient key={s.id} id={`grad${i}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor={s.color} stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor={s.color} stopOpacity={0}/>
+                </linearGradient>
+              ))}
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={DARK.border}/>
+            <XAxis dataKey="month" tick={{fill:DARK.muted,fontSize:11}}/>
+            <YAxis tick={{fill:DARK.muted,fontSize:11}}/>
+            <Tooltip contentStyle={{background:DARK.card,border:`1px solid ${DARK.border}`,borderRadius:8}}/>
+            <Legend/>
+            {SITES.map((s,i)=>(
+              <Area key={s.id} type="monotone" dataKey={s.shortName}
+                stroke={s.color} fill={`url(#grad${i})`} strokeWidth={2}/>
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+
+    </div>
+  );
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 7: APP ROUTER
+// Multi-page navigation. Pages: home, project/:key, resources, users, settings, alerts
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── AppContext — global state shared across all pages ─────────────────────────
+const AppContext = createContext(null);
+const useApp = () => useContext(AppContext);
+
+// ── Breadcrumb — shows current location ──────────────────────────────────────
+const Breadcrumb = ({page, siteKey, C}) => {
+  const site = SITES.find(s=>s.key===siteKey);
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.muted,marginBottom:4}}>
+      <Home size={12}/>
+      <span>HSSE</span>
+      {page !== "home" && <><ChevronRight size={10}/><span style={{color:C.text,fontWeight:600}}>
+        {page==="project" && site ? site.name
+         : page==="resources" ? "Resources"
+         : page==="users" ? "User Management"
+         : page==="settings" ? "Settings"
+         : page==="alerts" ? "Email Alerts"
+         : page}
+      </span></>}
+    </div>
+  );
+};
+
+// ── Sidebar nav items ─────────────────────────────────────────────────────────
+const buildNav = (userProfile) => {
+  const role = userProfile?.role;
+  const site = userProfile?.site;
+  const items = [
+    // Home always visible
+    { id:"home",      label:"All Projects",  icon:Home,     color:"#14b8a6", page:"home" },
+    // Project pages — filtered by site access
+    ...SITES
+      .filter(s => role==="admin" || site==="All Sites" || site===s.id)
+      .map(s => ({
+        id:    s.key,
+        label: s.shortName,
+        icon:  Activity,
+        color: s.color,
+        page:  "project",
+        siteKey: s.key,
+      })),
+    // Shared sections
+    { id:"resources", label:"Resources",     icon:Users,    color:"#06b6d4", page:"resources" },
+    // Admin only
+    ...(role==="admin" ? [
+      { id:"alerts",    label:"Email Alerts", icon:Bell,     color:"#f59e0b", page:"alerts",   adminOnly:true },
+      { id:"users",     label:"Users",        icon:Shield,   color:"#6366f1", page:"users",    adminOnly:true },
+      { id:"settings",  label:"Settings",     icon:Edit2,    color:"#0d9488", page:"settings", adminOnly:true },
+    ] : []),
+  ];
+  return items;
+};
+
+// ── Main AppRouter component ──────────────────────────────────────────────────
+const AppRouter = () => {
+  /* eslint-disable no-unused-vars */
+  const {
+    userProfile, authUser, C, darkMode, setDarkMode,
+    obs, ncr, risks, incidents, appEquipment, appManpower,
+    firestoreUsers, setFirestoreUsers,
+    zones, setZones, obsTypes, setObsTypes, actionsList, setActionsList,
+    obsSeverity, setObsSeverity, ncrCats, setNcrCats,
+    ncrSeverity, setNcrSeverity, ncrStatus, setNcrStatus,
+    riskCats, setRiskCats, riskStatus, setRiskStatus,
+    equipStatus, setEquipStatus, mpStatus, setMpStatus,
+    ltiResetDate, setLtiResetDate,
+    weeklyData, monthlyState, setMonthlyState,
+    manualStats, setManualStats, kpis, welfareItems,
+  } = useApp();
+  /* eslint-enable no-unused-vars */
+
+  // ── Routing state ─────────────────────────────────────────────────────────
+  const [page,    setPage]    = useState("home");    // "home" | "project" | "resources" | "users" | "settings" | "alerts"
+  const [siteKey, setSiteKey] = useState("site1");   // current project key
+  const [sideOpen,setSideOpen] = useState(true);
+  const [isMobile,setIsMobile] = useState(window.innerWidth<768);
+  const [notifOpen,setNotifOpen] = useState(false);
+  const [showChangePw,setShowChangePw] = useState(userProfile?.mustChangePassword||false);
+
+  useEffect(()=>{
+    const h=()=>setIsMobile(window.innerWidth<768);
+    window.addEventListener("resize",h);
+    return()=>window.removeEventListener("resize",h);
+  },[]);
+
+  // Navigate to a page
+  const navigate = useCallback((targetPage, key=null) => {
+    setPage(targetPage);
+    if(key) setSiteKey(key);
+    if(isMobile) setSideOpen(false);
+    window.scrollTo(0,0);
+  },[isMobile]);
+
+  const nav = buildNav(userProfile);
+  const currentSite = SITES.find(s=>s.key===siteKey) || SITES[0];
+  const role = ROLE_META[userProfile?.role] || ROLE_META.viewer;
+
+  // ── Alert count for badge ─────────────────────────────────────────────────
+  const alerts = [
+    ...(ncr||[]).filter(n=>n.status==="Overdue").map(n=>({msg:`NCR ${n.id} overdue`,color:C.red})),
+    ...(obs||[]).filter(o=>o.severity==="High"&&o.status==="Open").slice(0,3).map(o=>({msg:`High obs: ${o.area||""}`,color:C.orange})),
+    ...(incidents||[]).filter(i=>i.damInjEnv==="LTI").map(i=>({msg:`LTI recorded: ${i.reportNo||""}`,color:C.red})),
+  ];
+
+  const sideWidth = isMobile ? (sideOpen?240:0) : (sideOpen?252:64);
+
+  // ── Render current page ───────────────────────────────────────────────────
+  const renderPage = () => {
+    switch(page) {
+      case "home":
+        return (
+          <HomePage
+            obs={obs} ncr={ncr} incidents={incidents}
+            appEquipment={appEquipment} appManpower={appManpower}
+            userProfile={userProfile}
+            onNavigate={navigate}
+            C={C}
+          />
+        );
+      case "project":
+        return (
+          <SiteDashboard
+            siteId={currentSite.id}
+            userProfile={userProfile}
+            zones={zones} obsTypes={obsTypes} actionsList={actionsList}
+            obsSeverity={obsSeverity} ncrCats={ncrCats} ncrSeverity={ncrSeverity}
+            ncrStatus={ncrStatus} riskCats={riskCats} riskStatus={riskStatus}
+            equipStatus={equipStatus} mpStatus={mpStatus} risks={risks}
+            ltiResetDate={ltiResetDate}
+            incidents={(incidents||[]).filter(i=>!i.site||i.site===currentSite.id)}
+            C={C}
+          />
+        );
+      case "resources":
+        return <Resources user={userProfile} equipStatus={equipStatus} mpStatus={mpStatus} C={C}/>;
+      case "users":
+        return <UserMgmt firestoreUsers={firestoreUsers} setFirestoreUsers={setFirestoreUsers} userRole={userProfile?.role} C={C}/>;
+      case "settings":
+        return (
+          <DropdownSettings
+            zones={zones} setZones={setZones}
+            obsTypes={obsTypes} setObsTypes={setObsTypes}
+            actionsList={actionsList} setActionsList={setActionsList}
+            obsSeverity={obsSeverity} setObsSeverity={setObsSeverity}
+            ncrCats={ncrCats} setNcrCats={setNcrCats}
+            ncrSeverity={ncrSeverity} setNcrSeverity={setNcrSeverity}
+            ncrStatus={ncrStatus} setNcrStatus={setNcrStatus}
+            riskCats={riskCats} setRiskCats={setRiskCats}
+            riskStatus={riskStatus} setRiskStatus={setRiskStatus}
+            equipStatus={equipStatus} setEquipStatus={setEquipStatus}
+            mpStatus={mpStatus} setMpStatus={setMpStatus}
+            ltiResetDate={ltiResetDate} setLtiResetDate={setLtiResetDate}
+            C={C}
+          />
+        );
+      case "alerts":
+        return (
+          <EmailAlerts
+            obs={obs} ncr={ncr}
+            equipment={appEquipment} manpower={appManpower}
+            firestoreUsers={firestoreUsers}
+            weeklyData={weeklyData} monthlyState={monthlyState}
+            C={C}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  // ── Page title ────────────────────────────────────────────────────────────
+  const pageTitle = page==="home"       ? "All Projects Overview"
+                  : page==="project"    ? currentSite.name
+                  : page==="resources"  ? "Resources"
+                  : page==="users"      ? "User Management"
+                  : page==="settings"   ? "Dropdown Settings"
+                  : page==="alerts"     ? "Email Alerts"
+                  : "";
+
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",display:"flex",fontFamily:"Inter,sans-serif",color:C.text}}>
+      {showChangePw&&<ChangePasswordModal onClose={()=>setShowChangePw(false)} mustChange={userProfile?.mustChangePassword} C={C}/>}
+      {isMobile&&sideOpen&&<div onClick={()=>setSideOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:199}}/>}
+
+      {/* ── Sidebar ── */}
+      <aside style={{
+        background:C.card,borderRight:`1px solid ${C.border}`,
+        width:sideWidth,transition:"width .25s",flexShrink:0,
+        display:"flex",flexDirection:"column",
+        position:isMobile?"fixed":"sticky",top:0,left:0,height:"100vh",
+        overflowY:"auto",overflowX:"hidden",
+        zIndex:isMobile?200:10,
+        boxShadow:isMobile&&sideOpen?"4px 0 20px rgba(0,0,0,0.4)":"none",
+      }}>
+        {/* Logo */}
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+          <div style={{flexShrink:0}}>
+            <img src="/dan-logo.png" alt="DAN" style={{width:sideOpen?44:34,height:sideOpen?44:34,objectFit:"contain"}}/>
+          </div>
+          {sideOpen&&<div style={{overflow:"hidden"}}>
+            <div style={{color:C.text,fontWeight:900,fontSize:12,whiteSpace:"nowrap"}}>DAN Company</div>
+            <div style={{color:"#14b8a6",fontSize:9,whiteSpace:"nowrap"}}>HSSE Command Center</div>
+          </div>}
+          <button onClick={()=>setSideOpen(!sideOpen)} style={{marginLeft:"auto",background:"none",border:"none",cursor:"pointer",color:C.muted,flexShrink:0}}>
+            <Menu size={15}/>
+          </button>
+        </div>
+
+        {/* Nav items */}
+        <nav style={{flex:1,padding:"8px 6px",display:"flex",flexDirection:"column",gap:1}}>
+          {/* Home link */}
+          {nav.filter(n=>n.page==="home").map(n=>(
+            <button key={n.id} onClick={()=>navigate("home")}
+              style={{
+                background:page==="home"?n.color+"22":"transparent",
+                color:page==="home"?n.color:C.muted,
+                borderLeft:page==="home"?`3px solid ${n.color}`:"3px solid transparent",
+                borderTop:"none",borderRight:"none",borderBottom:"none",
+                borderRadius:"0 8px 8px 0",padding:"9px 10px",
+                display:"flex",alignItems:"center",gap:9,
+                fontSize:12,fontWeight:page==="home"?700:400,
+                cursor:"pointer",textAlign:"left",width:"100%",
+              }}>
+              <n.icon size={16} style={{flexShrink:0}}/>
+              {sideOpen&&<span>All Projects</span>}
+            </button>
+          ))}
+
+          {/* Separator */}
+          {sideOpen&&<div style={{fontSize:9,color:C.muted,padding:"8px 10px 4px",textTransform:"uppercase",letterSpacing:1.5,fontWeight:700}}>Projects</div>}
+
+          {/* Project links */}
+          {nav.filter(n=>n.page==="project").map(n=>{
+            const isActive = page==="project"&&siteKey===n.siteKey;
+            return (
+              <button key={n.id} onClick={()=>navigate("project",n.siteKey)}
+                style={{
+                  background:isActive?n.color+"22":"transparent",
+                  color:isActive?n.color:C.muted,
+                  borderLeft:isActive?`3px solid ${n.color}`:"3px solid transparent",
+                  borderTop:"none",borderRight:"none",borderBottom:"none",
+                  borderRadius:"0 8px 8px 0",padding:"9px 10px",
+                  display:"flex",alignItems:"center",gap:9,
+                  fontSize:12,fontWeight:isActive?700:400,
+                  cursor:"pointer",textAlign:"left",width:"100%",
+                }}>
+                <div style={{
+                  width:8,height:8,borderRadius:"50%",
+                  background:n.color,flexShrink:0,
+                  boxShadow:isActive?`0 0 8px ${n.color}`:undefined,
+                }}/>
+                {sideOpen&&<span style={{overflow:"hidden",textOverflow:"ellipsis"}}>{SITES.find(s=>s.key===n.siteKey)?.name||n.label}</span>}
+              </button>
+            );
+          })}
+
+          {/* Separator */}
+          {sideOpen&&<div style={{fontSize:9,color:C.muted,padding:"8px 10px 4px",textTransform:"uppercase",letterSpacing:1.5,fontWeight:700}}>Shared</div>}
+
+          {/* Other pages */}
+          {nav.filter(n=>n.page!=="home"&&n.page!=="project").map(n=>{
+            const isActive = page===n.page;
+            return (
+              <button key={n.id} onClick={()=>navigate(n.page)}
+                style={{
+                  background:isActive?n.color+"22":"transparent",
+                  color:isActive?n.color:C.muted,
+                  borderLeft:isActive?`3px solid ${n.color}`:"3px solid transparent",
+                  borderTop:"none",borderRight:"none",borderBottom:"none",
+                  borderRadius:"0 8px 8px 0",padding:"9px 10px",
+                  display:"flex",alignItems:"center",gap:9,
+                  fontSize:12,fontWeight:isActive?700:400,
+                  cursor:"pointer",textAlign:"left",width:"100%",
+                }}>
+                <n.icon size={16} style={{flexShrink:0}}/>
+                {sideOpen&&<span>
+                  {n.label}
+                  {n.adminOnly&&<span style={{fontSize:9,background:C.red+"33",color:C.red,marginLeft:6,padding:"1px 5px",borderRadius:99}}>ADMIN</span>}
+                </span>}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* User info footer */}
+        <div style={{padding:10,borderTop:`1px solid ${C.border}`,flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{
+              background:role.color+"33",width:30,height:30,borderRadius:"50%",
+              display:"flex",alignItems:"center",justifyContent:"center",
+              fontSize:10,fontWeight:700,color:role.color,flexShrink:0,
+            }}>
+              {userProfile?.avatar||"??"}
+            </div>
+            {sideOpen&&<div style={{overflow:"hidden",flex:1}}>
+              <div style={{fontSize:11,fontWeight:600,color:C.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{userProfile?.name}</div>
+              <div style={{fontSize:10,color:C.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{userProfile?.email}</div>
+            </div>}
+          </div>
+          {sideOpen&&<button onClick={()=>setShowChangePw(true)}
+            style={{marginTop:8,width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+            <Key size={11}/>Change Password
+          </button>}
+        </div>
+      </aside>
+
+      {/* ── Main content ── */}
+      <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
+
+        {/* Header */}
+        <header style={{
+          background:C.card,borderBottom:`1px solid ${C.border}`,
+          padding:"10px 16px",display:"flex",alignItems:"center",gap:8,
+          position:"sticky",top:0,zIndex:100,flexShrink:0,flexWrap:"wrap",
+        }}>
+          {isMobile&&<button onClick={()=>setSideOpen(true)} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,display:"flex"}}>
+            <Menu size={18}/>
+          </button>}
+
+          <div style={{minWidth:0,flex:1}}>
+            <Breadcrumb page={page} siteKey={siteKey} C={C}/>
+            <h1 style={{color:C.text,fontWeight:900,fontSize:15,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {pageTitle}
+            </h1>
+          </div>
+
+          {/* Role badge */}
+          <div style={{background:role.color+"22",border:`1px solid ${role.color}44`,borderRadius:99,padding:"3px 8px",display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
+            <Lock size={9} style={{color:role.color}}/>
+            <span style={{color:role.color,fontSize:10,fontWeight:700}}>{role.label}</span>
+          </div>
+
+          {/* Header actions */}
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <button onClick={()=>setDarkMode(!darkMode)}
+              style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 8px",cursor:"pointer",color:C.sub,display:"flex"}}>
+              {darkMode?<Sun size={14}/>:<Moon size={14}/>}
+            </button>
+
+            {/* Notifications */}
+            <div style={{position:"relative"}}>
+              <button onClick={()=>setNotifOpen(!notifOpen)}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 8px",cursor:"pointer",color:C.sub,display:"flex"}}>
+                <Bell size={14}/>
+              </button>
+              {alerts.length>0&&<div style={{position:"absolute",top:-4,right:-4,background:C.red,color:"#fff",width:15,height:15,borderRadius:"50%",fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>
+                {Math.min(alerts.length,9)}
+              </div>}
+              {notifOpen&&(
+                <div style={{position:"absolute",right:0,top:34,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:12,width:260,boxShadow:"0 8px 32px rgba(0,0,0,0.3)",zIndex:300}}>
+                  <div style={{fontWeight:700,color:C.text,fontSize:12,marginBottom:8}}>🔔 Alerts ({alerts.length})</div>
+                  {alerts.slice(0,6).map((a,i)=>(
+                    <div key={i} style={{display:"flex",gap:7,alignItems:"center",padding:"5px 0",borderBottom:`1px solid ${C.border}44`}}>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:a.color,flexShrink:0}}/>
+                      <span style={{fontSize:11,color:C.sub}}>{a.msg}</span>
+                    </div>
+                  ))}
+                  {alerts.length===0&&<div style={{color:C.muted,fontSize:12}}>No active alerts 🎉</div>}
+                </div>
+              )}
+            </div>
+
+            <button onClick={()=>signOut(auth)}
+              style={{background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:8,padding:"6px 8px",cursor:"pointer",color:C.red,display:"flex",alignItems:"center",gap:4,fontSize:11,fontWeight:600}}>
+              <LogOut size={12}/>{!isMobile&&"Logout"}
+            </button>
+          </div>
+        </header>
+
+        {/* Page content */}
+        <main style={{flex:1,padding:isMobile?12:20,overflowY:"auto"}}>
+          {renderPage()}
+        </main>
+      </div>
+    </div>
+  );
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 8: DATA PROVIDER (AppInner)
+// Loads all data from Neon, provides it via AppContext to all pages.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const AppInner = () => {
+  const [darkMode,setDarkMode]     = useState(true);
+  const C                          = darkMode ? DARK : LIGHT;
+
+  // ── Auth state ────────────────────────────────────────────────────────────
+  const [authUser,setAuthUser]         = useState(null);
+  const [userProfile,setUserProfile]   = useState(null);
+  const [authLoading,setAuthLoading]   = useState(true);
+  // eslint-disable-next-line no-unused-vars
+  const [accessDenied,setAccessDenied] = useState(false);
+  const [showChangePw,setShowChangePw] = useState(false);
+
+  // ── App state ─────────────────────────────────────────────────────────────
+  const [dataLoading,setDataLoading]   = useState(true);
+  // eslint-disable-next-line no-unused-vars
+  const [isMobile,setIsMobile]         = useState(window.innerWidth<768);
+
+  // ── Collections (global — all sites) ─────────────────────────────────────
+  const [obs,setObs]                   = useState([]);
+  const [ncr,setNcr]                   = useState([]);
+  const [risks,setRisks]               = useState([]);
+  const [incidents,setIncidents]       = useState([]);
+  const [appEquipment,setAppEquipment] = useState([]);
+  const [appManpower,setAppManpower]   = useState([]);
+  const [firestoreUsers,setFirestoreUsers] = useState([]);
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  const [zones,setZones]               = useState(DEFAULT_ZONES);
+  const [obsTypes,setObsTypes]         = useState(DEFAULT_OBS_TYPES);
+  const [actionsList,setActionsList]   = useState(DEFAULT_ACTIONS);
+  const [obsSeverity,setObsSeverity]   = useState(DEFAULT_OBS_SEVERITY);
+  const [ncrCats,setNcrCats]           = useState(DEFAULT_NCR_CATS);
+  const [ncrSeverity,setNcrSeverity]   = useState(DEFAULT_NCR_SEVERITY);
+  const [ncrStatus,setNcrStatus]       = useState(DEFAULT_NCR_STATUS);
+  const [riskCats,setRiskCats]         = useState(DEFAULT_RISK_CATS);
+  const [riskStatus,setRiskStatus]     = useState(DEFAULT_RISK_STATUS);
+  const [equipStatus,setEquipStatus]   = useState(DEFAULT_EQUIP_STATUS);
+  const [mpStatus,setMpStatus]         = useState(DEFAULT_MP_STATUS);
+  const [ltiResetDate,setLtiResetDate] = useState(null);
+  const [manualStats,setManualStats]   = useState(INIT_MANUAL_STATS);
+  const [kpis,setKpis]                 = useState(DEFAULT_KPI_DATA);
   const [welfareItems,setWelfareItems] = useState(DEFAULT_WELFARE_ITEMS);
-  const [weeklyData,setWeeklyData]   = useState(WEEKLY_DATA);
-  const [monthlyState,setMonthlyState] = useState({
-    trend: DEFAULT_MONTHLY_TREND,
-    summary: {welfare:"87%",training:"94%"},
-    kpiItems: INIT_KPI_ITEMS,
-    kpiTable: buildDefaultKpiTable(INIT_KPI_ITEMS),
-    pciItems: INIT_PCI_ITEMS,
-    pciTable: buildDefaultKpiTable(INIT_PCI_ITEMS),
-  });
+  const [weeklyData,setWeeklyData]     = useState(WEEKLY_DATA);
+  const [monthlyState,setMonthlyState] = useState(null);
+  const [settingsLoading,setSettingsLoading] = useState(true);
 
-  const training=[{id:"TR-001",name:"J. Rahman",course:"NEBOSH IGC",status:"Valid"},{id:"TR-002",name:"M. Torres",course:"Forklift",status:"Expired"}];
-  const ptw=[{id:"PTW-001",type:"Hot Work",area:"Zone A",status:"Active"},{id:"PTW-002",type:"Confined Space",area:"Tank Farm",status:"Active"}];
-
-  // ── AUTH LISTENER (Neon) ─────────────────────────────────────────────────────
-  // neonAuth.onAuthStateChanged fires immediately:
-  // - With user object if a valid JWT token exists in localStorage
-  // - With null if no token or token expired
-  // The user object already contains all profile fields from Neon users table
+  // ── Auth listener ─────────────────────────────────────────────────────────
   useEffect(()=>{
     const unsub = auth.onAuthStateChanged(async neonUser => {
       if(neonUser){
         setAccessDenied(false);
         try{
-          // neonUser is the full profile from /auth/me
-          // Map to the shape the rest of the app expects
           const profile = {
             uid:                neonUser.id || neonUser.uid,
             email:              neonUser.email || "",
@@ -7201,443 +6882,164 @@ const AppInner = () => {
             site:               neonUser.site  || "Site 1",
             avatar:             neonUser.avatar || (neonUser.name||"??").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase(),
             permissions:        neonUser.permissions || DEFAULT_PERMISSIONS[neonUser.role||"viewer"],
-            // Scoped grants (Turn A backend, Turn B frontend). Safely default to []
-            // so this works even if the API response didn't include the field.
-            grants:             Array.isArray(neonUser.grants) ? neonUser.grants : [],
             mustChangePassword: neonUser.mustChangePassword || neonUser.must_change_password || false,
           };
           setUserProfile(profile);
           setAuthUser({ uid: profile.uid, email: profile.email });
-          setActive(getDefaultSection(profile));
           if(profile.mustChangePassword) setShowChangePw(true);
         }catch(e){
           console.error("[HSSE] Auth profile error:",e.message);
-          setAuthUser(null);
-          setUserProfile(null);
+          setAuthUser(null); setUserProfile(null);
         }
       } else {
-        setAuthUser(null);
-        setUserProfile(null);
-        setAccessDenied(false);
+        setAuthUser(null); setUserProfile(null); setAccessDenied(false);
       }
       setAuthLoading(false);
     });
     return()=>unsub();
   },[]);
 
-  // ── WATCH SETTINGS FROM FIRESTORE (real-time) ────────────────────────────
-  // onSnapshot keeps Overview + all sections live — any save by any user
-  // or browser tab is reflected instantly without a page refresh.
+  // ── Global settings listener ──────────────────────────────────────────────
   useEffect(()=>{
     if(!authUser) return;
-    const unsub=onSnapshot(
+    const unsub = onSnapshot(
       doc(db,"settings","dashboardData"),
       (snap)=>{
         if(snap.exists()){
-          const d=snap.data?.()??snap.data??{};
-          if(d.zones)          setZones(d.zones);
-          if(d.obsTypes)       setObsTypes(d.obsTypes);
-          if(d.actionsList)    setActionsList(d.actionsList);
-          if(d.obsSeverity)    setObsSeverity(d.obsSeverity);
-          if(d.ncrCats)        setNcrCats(d.ncrCats);
-          if(d.ncrSeverity)    setNcrSeverity(d.ncrSeverity);
-          if(d.ncrStatus)      setNcrStatus(d.ncrStatus);
-          if(d.riskCats)       setRiskCats(d.riskCats);
-          if(d.riskStatus)     setRiskStatus(d.riskStatus);
-          if(d.equipStatus)    setEquipStatus(d.equipStatus);
-          if(d.mpStatus)       setMpStatus(d.mpStatus);
-          if(d.ltiResetDate)   setLtiResetDate(d.ltiResetDate);
-          if(d.manualStats)    setManualStats(d.manualStats);
-          if(d.lastSent)       setAppLastSent(d.lastSent);
-          if(d.kpis)           setKpis(d.kpis);
-          if(d.radarData)      setRadarData(d.radarData);
-          if(d.welfareItems)   setWelfareItems(d.welfareItems);
-          if(d.weeklyData)     setWeeklyData(d.weeklyData);
-          if(d.monthlyState){
-            setMonthlyState(prev=>({
-              ...prev,
-              ...d.monthlyState,
-              kpiTable: d.monthlyState.kpiTable||buildDefaultKpiTable(d.monthlyState.kpiItems||INIT_KPI_ITEMS),
-              pciTable: d.monthlyState.pciTable||buildDefaultKpiTable(d.monthlyState.pciItems||INIT_PCI_ITEMS),
-            }));
-          }
+          const d = snap.data?.()??snap.data??{};
+          if(d.zones)        setZones(d.zones);
+          if(d.obsTypes)     setObsTypes(d.obsTypes);
+          if(d.actionsList)  setActionsList(d.actionsList);
+          if(d.obsSeverity)  setObsSeverity(d.obsSeverity);
+          if(d.ncrCats)      setNcrCats(d.ncrCats);
+          if(d.ncrSeverity)  setNcrSeverity(d.ncrSeverity);
+          if(d.ncrStatus)    setNcrStatus(d.ncrStatus);
+          if(d.riskCats)     setRiskCats(d.riskCats);
+          if(d.riskStatus)   setRiskStatus(d.riskStatus);
+          if(d.equipStatus)  setEquipStatus(d.equipStatus);
+          if(d.mpStatus)     setMpStatus(d.mpStatus);
+          if(d.ltiResetDate) setLtiResetDate(d.ltiResetDate);
+          if(d.manualStats)  setManualStats(d.manualStats);
+          if(d.kpis)         setKpis(d.kpis);
+          if(d.welfareItems) setWelfareItems(d.welfareItems);
+          if(d.weeklyData)   setWeeklyData(d.weeklyData);
+          if(d.monthlyState) setMonthlyState(prev=>({
+            ...buildDefaultMonthlyState(),
+            ...prev,
+            ...d.monthlyState,
+          }));
         }
         setSettingsLoading(false);
       },
-      (err)=>{console.error("Settings listener error:",err); setSettingsLoading(false);}
+      (err)=>{ console.error("[HSSE] Settings listener:",err); setSettingsLoading(false); }
     );
-    return ()=>unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return()=>unsub();
   },[authUser]);
 
-  // ── REALTIME COLLECTIONS ─────────────────────────────────────────────────
+  // ── Global collection listeners (all sites) ───────────────────────────────
   useEffect(()=>{
     if(!authUser) return;
-    const cols=[["observations",setObs],["ncr",setNcr],["risks",setRisks],["equipment",setAppEquipment],["manpower",setAppManpower],["incidents",setIncidents]];
-    const loadedCols = new Set();
-    const markLoaded = (col) => {
-      loadedCols.add(col);
-      if(loadedCols.size>=cols.length) setDataLoading(false);
+    const spreadRaw = d => {
+      const flat = d.data?.()||d;
+      const raw  = typeof flat.raw==="string" ? JSON.parse(flat.raw||"{}") : (flat.raw||{});
+      return { ...raw, ...flat, _docId: d.id||d._docId||flat.id };
     };
-    const onErr=(col)=>(e)=>{
-      console.error(`[HSSE] Firestore listener(${col}) error:`,e.code,e.message);
-      markLoaded(col); // mark as done even on error so UI doesn't hang
-    };
-    const unsubs=cols.map(([name,setter])=>onSnapshot(
-      collection(db,name),
-      snap=>{
-        try{setter(snap.docs.map(d=>{const flat=d.data?.()||d;const raw=typeof flat.raw==="string"?JSON.parse(flat.raw||"{}"):flat.raw||{};return{...raw,...flat,_docId:d.id||flat.id};}));}
-        catch(e){console.error(`[HSSE] setter(${name}) failed:`,e);}
-        markLoaded(name);
-      },
-      onErr(name)
-    ));
-    const unsubUsers=onSnapshot(
-      collection(db,"users"),
-      snap=>setFirestoreUsers(snap.docs.map(d=>({...d.data?.()||d,uid:d.id}))),
-      e=>console.error("[HSSE] users listener:",e.code)
+    const cols = [
+      ["observations", setObs],
+      ["ncr",          setNcr],
+      ["risks",        setRisks],
+      ["equipment",    setAppEquipment],
+      ["manpower",     setAppManpower],
+      ["incidents",    setIncidents],
+    ];
+    let loaded = 0;
+    const unsubs = cols.map(([name,setter]) =>
+      onSnapshot(
+        collection(db, name),
+        snap => {
+          try { setter(snap.docs.map(spreadRaw)); }
+          catch(e){ console.error(`[HSSE] setter(${name}):`,e); }
+          if(++loaded >= cols.length) setDataLoading(false);
+        },
+        e => { console.error(`[HSSE] listener(${name}):`,e.message); setDataLoading(false); }
+      )
     );
-    return()=>{unsubs.forEach(u=>u());unsubUsers();};
+    const unsubUsers = onSnapshot(
+      collection(db,"users"),
+      snap => setFirestoreUsers(snap.docs.map(d=>({...d.data?.()||d,uid:d.id}))),
+      e => console.error("[HSSE] users listener:",e.message)
+    );
+    return()=>{ unsubs.forEach(u=>u()); unsubUsers(); };
   },[authUser]);
 
   useEffect(()=>{
     const h=()=>setIsMobile(window.innerWidth<768);
-    window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h);
+    window.addEventListener("resize",h);
+    return()=>window.removeEventListener("resize",h);
   },[]);
 
-  // ── Role-based default landing ──────────────────────────────────────────────
-  // Once userProfile is available, if there's no hash in the URL send the user
-  // to their default page (admin/All Sites → home; site-specific users → their
-  // site page). We only do this when the hash is empty so we don't override a
-  // deep link the user bookmarked.
+  // ── Inactivity timeout (8 hours) ──────────────────────────────────────────
   useEffect(()=>{
-    if(!userProfile) return;
-    const hashHas = !!(window.location.hash||"").replace(/^#\/?/,"");
-    if(hashHas) return;
-    const def = getDefaultSection(userProfile);
-    setActive(def);
-    const slug = ID_TO_HASH[def];
-    if(slug) window.location.hash = "#/"+slug;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[userProfile]);
+    if(!authUser) return;
+    const TIMEOUT = 8*60*60*1000;
+    let timer = setTimeout(()=>signOut(auth), TIMEOUT);
+    const reset = ()=>{ clearTimeout(timer); timer=setTimeout(()=>signOut(auth),TIMEOUT); };
+    ["mousedown","keydown","touchstart","scroll"].forEach(e=>window.addEventListener(e,reset,{passive:true}));
+    return()=>{ clearTimeout(timer); ["mousedown","keydown","touchstart","scroll"].forEach(e=>window.removeEventListener(e,reset)); };
+  },[authUser]);
 
-  // ── Keep URL hash in sync when user clicks a nav item ──────────────────────
-  useEffect(()=>{
-    const slug = ID_TO_HASH[active];
-    if(!slug) return;
-    const current = (window.location.hash||"").replace(/^#\/?/,"").toLowerCase();
-    if(current !== slug) window.location.hash = "#/"+slug;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[active]);
-
-  // ── React to browser back/forward (hash change) ─────────────────────────────
-  useEffect(()=>{
-    const onHash = () => {
-      const id = sectionFromHash();
-      if(id) setActive(id);
-    };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[]);
-
-  // eslint-disable-next-line no-unused-vars
-  const handleAddIncident = async (data) => {
-    try{ await fbAdd("incidents", data); }
-    catch(e){ console.error("[HSSE] handleAddIncident:",e); throw e; }
-  };
-  // eslint-disable-next-line no-unused-vars
-  const handleDeleteIncident = async (docId) => {
-    if(!docId) return;
-    if(!window.confirm("Delete this incident record? This cannot be undone.")) return;
-    try{ await fbDelId("incidents", docId); }
-    catch(e){ console.error("[HSSE] handleDeleteIncident:",e); alert("Delete failed: "+e.message); }
-  };
-
-  const handleSignOut=async()=>{
-    try{
-      clearTimeout(inactivityTimer.current);
-      await signOut(auth);
-    }catch(e){
-      console.error("[HSSE] Sign out error:",e);
-      // Force clear local state even if Firebase signOut fails
-      setAuthUser(null);
-      setUserProfile(null);
-    }
-  };
-
-  const handleGeneratePPT = async () => {
-    setPptGenerating(true);
-    try {
-      await generatePPT({ obs, ncr, kpis, manualStats, welfareItems, weeklyData, userProfile, computedDaysLTI });
-    } catch(err) {
-      console.error("PPT generation failed:", err);
-      alert("❌ Could not generate presentation: " + err.message);
-    } finally {
-      setPptGenerating(false);
-    }
-  };
-
-  const LoadScreen = ({msg,sub}) => (
+  // ── Loading screens ───────────────────────────────────────────────────────
+  if(authLoading) return (
     <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"Inter,sans-serif"}}>
-      <DanLogo size={90}/>
-      <div style={{color:"#14b8a6",fontWeight:700,fontSize:16}}>{msg}</div>
-      <div style={{width:200,height:4,borderRadius:99,background:"#334155",overflow:"hidden"}}><div style={{width:"60%",height:4,borderRadius:99,background:"linear-gradient(90deg,#14b8a6,#6366f1)"}}/></div>
-      {sub&&<div style={{color:"#64748b",fontSize:12}}>{sub}</div>}
-    </div>
-  );
-
-  if(authLoading) return <LoadScreen msg="Loading…"/>;
-  // Access denied — signed in with Microsoft but not pre-approved
-  if(accessDenied) return(
-    <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"Inter,sans-serif",padding:16}}>
-      <div style={{background:"#1e293b",border:"1px solid #ef444444",borderRadius:20,padding:40,width:"100%",maxWidth:440,textAlign:"center",boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}}>
-        <div style={{fontSize:52,marginBottom:16}}>🚫</div>
-        <h2 style={{color:"#ef4444",fontWeight:900,fontSize:20,margin:"0 0 12px"}}>Access Denied</h2>
-        <p style={{color:"#94a3b8",fontSize:13,lineHeight:1.7,marginBottom:8}}>
-          <strong style={{color:"#e2e8f0"}}>{deniedEmail}</strong> is not authorised to access this system.
-        </p>
-        <p style={{color:"#64748b",fontSize:12,lineHeight:1.7,marginBottom:24}}>
-          Please contact your system administrator to be added as an approved user.
-        </p>
-        <button onClick={()=>{setAccessDenied(false);setDeniedEmail("");}}
-          style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:"10px 24px",fontWeight:700,fontSize:13,cursor:"pointer"}}>
-          ← Try a different account
-        </button>
-        <div style={{marginTop:20,padding:"10px 14px",background:"#0f172a",borderRadius:8,fontSize:11,color:"#64748b"}}>
-          🔒 DAN Company HSSE System — Restricted Access
-        </div>
+      <img src="/dan-logo.png" alt="DAN" style={{width:90,height:90,objectFit:"contain"}}/>
+      <div style={{color:"#14b8a6",fontWeight:700,fontSize:16}}>Loading...</div>
+      <div style={{width:200,height:4,borderRadius:99,background:"#334155",overflow:"hidden"}}>
+        <div style={{width:"60%",height:4,borderRadius:99,background:"linear-gradient(90deg,#14b8a6,#6366f1)"}}/>
       </div>
     </div>
   );
 
   if(!authUser||!userProfile) return <Login C={C}/>;
-  if(dataLoading||settingsLoading) return <LoadScreen msg="Loading HSSE Data…" sub="Connecting to Firebase…"/>;
 
-  const role=ROLE_META[userProfile.role]||ROLE_META.viewer;
-  const userPerms=userProfile.permissions||DEFAULT_PERMISSIONS[userProfile.role];
+  if(dataLoading||settingsLoading) return (
+    <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"Inter,sans-serif"}}>
+      <img src="/dan-logo.png" alt="DAN" style={{width:90,height:90,objectFit:"contain"}}/>
+      <div style={{color:"#14b8a6",fontWeight:700,fontSize:16}}>Loading HSSE Data...</div>
+      <div style={{width:200,height:4,borderRadius:99,background:"#334155",overflow:"hidden"}}>
+        <div style={{width:"70%",height:4,borderRadius:99,background:"linear-gradient(90deg,#14b8a6,#6366f1)"}}/>
+      </div>
+      <div style={{color:"#64748b",fontSize:12}}>Connecting to Neon PostgreSQL...</div>
+    </div>
+  );
 
-  // ── Auto-compute Days Without LTI from reset date ────────────────────────
-  // If ltiResetDate is set, compute days since that date automatically
-  const computedDaysLTI = (() => {
-    if(ltiResetDate){
-      const reset = new Date(ltiResetDate);
-      if(isNaN(reset.getTime())) return manualStats?.daysLTI||0;
-      const days = Math.floor((new Date() - reset) / (1000*60*60*24));
-      return Math.max(0, days); // never show negative days
-    }
-    return manualStats?.daysLTI||0;
-  })();
-  const visibleNav=getSiteNavItems(userProfile.site, userProfile.role, userPerms, userProfile.grants);
-  const sideWidth=isMobile?(sideOpen?240:0):(sideOpen?248:62);
-  // Weekly digest reminder — true if never sent or 7+ days since last send
-  const digestDaysSince = appLastSent
-    ? Math.floor((new Date() - new Date(appLastSent)) / (1000*60*60*24))
-    : null;
-  const digestDue = digestDaysSince===null || digestDaysSince>=7;
-  const digestDueMsg = digestDaysSince===null
-    ? "Weekly email digest has never been sent"
-    : `Weekly digest overdue — last sent ${digestDaysSince} day${digestDaysSince!==1?"s":""} ago`;
-
-  const alerts=[
-    ...ncr.filter(n=>n.status==="Overdue").map(n=>({msg:`NCR ${n.id} overdue`,color:C.red})),
-    ...obs.filter(o=>o.severity==="High"&&o.status==="Open").map(o=>({msg:`High obs: ${o.area}`,color:C.orange})),
-    ...training.filter(t=>t.status==="Expired").map(t=>({msg:`${t.name} — training expired`,color:C.red})),
-    ...(digestDue&&userProfile.role==="admin"?[{msg:digestDueMsg,color:C.yellow,isDigest:true}]:[]),
-  ];
-
-  const renderSection = () => {
-    switch(active) {
-      // ── All-sites master overview (admin / All Sites users) ──────────────
-      case "overview":     return <Overview obs={obs} ncr={ncr} incidents={incidents} training={training} ptw={ptw} manualStats={manualStats} setManualStats={setManualStats} userRole={userProfile.role} kpis={kpis} computedDaysLTI={computedDaysLTI} manpower={appManpower} equipment={appEquipment} setActive={setActive} C={C}/>;
-      // ── Site dashboards — full HSSE hub per site ───────────────────────────
-      case "site1": return (
-        <SiteDashboard
-          siteId="Site 1"
-          userProfile={userProfile}
-          zones={zones} obsTypes={obsTypes} actionsList={actionsList}
-          obsSeverity={obsSeverity} ncrCats={ncrCats} ncrSeverity={ncrSeverity}
-          ncrStatus={ncrStatus} riskCats={riskCats} riskStatus={riskStatus}
-          equipStatus={equipStatus} mpStatus={mpStatus} risks={risks}
-          ltiResetDate={ltiResetDate}
-          incidents={(incidents||[]).filter(i=>!i.site||i.site==="Site 1")}
-          globalManualStats={manualStats}
-          C={C}
-        />
-      );
-      case "site2": return (
-        <SiteDashboard
-          siteId="Site 2"
-          userProfile={userProfile}
-          zones={zones} obsTypes={obsTypes} actionsList={actionsList}
-          obsSeverity={obsSeverity} ncrCats={ncrCats} ncrSeverity={ncrSeverity}
-          ncrStatus={ncrStatus} riskCats={riskCats} riskStatus={riskStatus}
-          equipStatus={equipStatus} mpStatus={mpStatus} risks={risks}
-          ltiResetDate={ltiResetDate}
-          incidents={incidents.filter(i=>!i.site||i.site==="Site 2") }
-          globalManualStats={manualStats}
-          C={C}
-        />
-      );
-      case "site3": return (
-        <SiteDashboard
-          siteId="Site 3"
-          userProfile={userProfile}
-          zones={zones} obsTypes={obsTypes} actionsList={actionsList}
-          obsSeverity={obsSeverity} ncrCats={ncrCats} ncrSeverity={ncrSeverity}
-          ncrStatus={ncrStatus} riskCats={riskCats} riskStatus={riskStatus}
-          equipStatus={equipStatus} mpStatus={mpStatus} risks={risks}
-          ltiResetDate={ltiResetDate}
-          incidents={incidents.filter(i=>!i.site||i.site==="Site 3") }
-          globalManualStats={manualStats}
-          C={C}
-        />
-      );
-      // ── Shared sections ────────────────────────────────────────────────────
-      case "resources":    return <Resources user={userProfile} equipStatus={equipStatus} mpStatus={mpStatus} C={C}/>;
-      case "users":        return <UserMgmt firestoreUsers={firestoreUsers} setFirestoreUsers={setFirestoreUsers} userRole={userProfile.role} C={C}/>;
-      case "notifications": return <EmailAlerts obs={obs} ncr={ncr} equipment={appEquipment} manpower={appManpower} firestoreUsers={firestoreUsers} weeklyData={weeklyData} monthlyState={monthlyState} C={C}/>;
-      case "dropdowns":    return <DropdownSettings zones={zones} setZones={setZones} obsTypes={obsTypes} setObsTypes={setObsTypes} actionsList={actionsList} setActionsList={setActionsList} obsSeverity={obsSeverity} setObsSeverity={setObsSeverity} ncrCats={ncrCats} setNcrCats={setNcrCats} ncrSeverity={ncrSeverity} setNcrSeverity={setNcrSeverity} ncrStatus={ncrStatus} setNcrStatus={setNcrStatus} riskCats={riskCats} setRiskCats={setRiskCats} riskStatus={riskStatus} setRiskStatus={setRiskStatus} equipStatus={equipStatus} setEquipStatus={setEquipStatus} mpStatus={mpStatus} setMpStatus={setMpStatus} ltiResetDate={ltiResetDate} setLtiResetDate={setLtiResetDate} C={C}/>;
-      default:             return null;
-    }
+  // ── Provide context to all pages ─────────────────────────────────────────
+  const contextValue = {
+    darkMode, setDarkMode, C,
+    authUser, userProfile,
+    obs, ncr, risks, incidents, appEquipment, appManpower, firestoreUsers, setFirestoreUsers,
+    zones, setZones, obsTypes, setObsTypes, actionsList, setActionsList,
+    obsSeverity, setObsSeverity, ncrCats, setNcrCats,
+    ncrSeverity, setNcrSeverity, ncrStatus, setNcrStatus,
+    riskCats, setRiskCats, riskStatus, setRiskStatus,
+    equipStatus, setEquipStatus, mpStatus, setMpStatus,
+    ltiResetDate, setLtiResetDate, manualStats, setManualStats,
+    kpis, welfareItems, weeklyData, monthlyState, setMonthlyState,
+    showChangePw, setShowChangePw,
   };
 
-  return(
-    <div style={{background:C.bg,minHeight:"100vh",display:"flex",fontFamily:"Inter,sans-serif",color:C.text,position:"relative"}}>
-      {showChangePw&&<ChangePasswordModal onClose={()=>setShowChangePw(false)} mustChange={userProfile.mustChangePassword} C={C}/>}
-      {isMobile&&sideOpen&&<div onClick={()=>setSideOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:199}}/>}
-      <aside style={{background:C.card,borderRight:`1px solid ${C.border}`,width:sideWidth,transition:"width .25s",flexShrink:0,display:"flex",flexDirection:"column",position:isMobile?"fixed":"sticky",top:0,left:0,height:"100vh",overflowY:"auto",overflowX:"hidden",zIndex:isMobile?200:10,boxShadow:isMobile&&sideOpen?"4px 0 20px rgba(0,0,0,0.4)":"none"}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
-          <div style={{flexShrink:0}}><DanLogo size={sideOpen?44:34}/></div>
-          {sideOpen&&<div style={{overflow:"hidden"}}><div style={{color:C.text,fontWeight:900,fontSize:12,whiteSpace:"nowrap",lineHeight:1.3}}>DAN Company</div><div style={{color:"#14b8a6",fontSize:9,whiteSpace:"nowrap"}}>HSSE Command Center</div></div>}
-          <button onClick={()=>setSideOpen(!sideOpen)} style={{marginLeft:"auto",background:"none",border:"none",cursor:"pointer",color:C.muted,flexShrink:0}}><Menu size={15}/></button>
-        </div>
-        <nav style={{flex:1,padding:"8px 6px",display:"flex",flexDirection:"column",gap:1}}>
-          {visibleNav.map(({id,label,icon:Icon,color,adminOnly})=>(
-            <button key={id} onClick={()=>{setActive(id);if(isMobile)setSideOpen(false);}}
-              style={{background:active===id?color+"22":"transparent",color:active===id?color:C.muted,borderLeft:active===id?`3px solid ${color}`:"3px solid transparent",borderTop:"none",borderRight:"none",borderBottom:"none",borderRadius:"0 8px 8px 0",padding:"9px 10px",display:"flex",alignItems:"center",gap:9,fontSize:12,fontWeight:active===id?700:400,cursor:"pointer",textAlign:"left",transition:"all .15s",whiteSpace:"nowrap",width:"100%"}}>
-              <div style={{position:"relative",flexShrink:0}}>
-                <Icon size={16}/>
-                {id==="notifications"&&digestDue&&userProfile.role==="admin"&&!sideOpen&&(
-                  <span style={{position:"absolute",top:-2,right:-2,width:6,height:6,borderRadius:"50%",background:C.yellow,border:`1px solid ${C.card}`}}/>
-                )}
-              </div>
-              {sideOpen&&<span style={{overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:5}}>
-                {label}
-                {adminOnly&&<span style={{fontSize:9,background:C.red+"33",color:C.red,marginLeft:4,padding:"1px 4px",borderRadius:99}}>ADMIN</span>}
-                {id==="notifications"&&digestDue&&userProfile.role==="admin"&&<span style={{width:7,height:7,borderRadius:"50%",background:C.yellow,flexShrink:0,display:"inline-block"}}/>}
-              </span>}
-            </button>
-          ))}
-        </nav>
-        <div style={{padding:10,borderTop:`1px solid ${C.border}`,flexShrink:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <div style={{background:role.color+"33",width:30,height:30,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:role.color,flexShrink:0}}>{userProfile.avatar||"??"}</div>
-            {sideOpen&&<div style={{overflow:"hidden",flex:1}}>
-              <div style={{fontSize:11,fontWeight:600,color:C.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{userProfile.name}</div>
-              <div style={{fontSize:10,color:C.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{authUser.email}</div>
-            </div>}
-          </div>
-
-        </div>
-        {sideOpen&&<button onClick={()=>setShowChangePw(true)} style={{margin:"0 10px 10px",width:"calc(100% - 20px)",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 8px",color:C.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}><Key size={11}/>Change Password</button>}
-      </aside>
-      <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
-        <header style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"10px 16px",display:"flex",alignItems:"center",gap:8,position:"sticky",top:0,zIndex:100,flexShrink:0,flexWrap:"wrap"}}>
-          {isMobile&&<button onClick={()=>setSideOpen(true)} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,padding:4,display:"flex"}}><Menu size={18}/></button>}
-          <div style={{minWidth:0}}>
-            <h1 style={{color:C.text,fontWeight:900,fontSize:15,margin:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{NAV.find(n=>n.id===active)?.label}</h1>
-            <p style={{color:C.muted,fontSize:10,margin:0}}>{new Date().toDateString()} · {userProfile.site}</p>
-          </div>
-          <div style={{background:role.color+"22",border:`1px solid ${role.color}44`,borderRadius:99,padding:"3px 8px",display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
-            <Lock size={9} style={{color:role.color}}/><span style={{color:role.color,fontSize:10,fontWeight:700}}>{role.label}</span>
-          </div>
-          <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
-            {!isMobile&&<div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,display:"flex",alignItems:"center",gap:6,padding:"5px 10px"}}>
-              <Search size={12} style={{color:C.muted}}/>
-              <input
-                placeholder="Search..."
-                style={{background:"transparent",border:"none",color:C.text,fontSize:12,outline:"none",width:90}}
-                onChange={e=>{
-                  // Global search: navigate to site1 obs section with filter pre-filled
-                  const v=e.target.value.trim();
-                  if(v.length>=2) setActive(userProfile?.site==="Site 2"?"site2":userProfile?.site==="Site 3"?"site3":"site1");
-                }}
-              />
-            </div>}
-            <button onClick={()=>setDarkMode(!darkMode)} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 8px",cursor:"pointer",color:C.sub,display:"flex"}}>
-              {darkMode?<Sun size={14}/>:<Moon size={14}/>}
-            </button>
-            <div style={{position:"relative"}} onBlur={e=>{ if(!e.currentTarget.contains(e.relatedTarget)) setNotifOpen(false); }}>
-              <button onClick={()=>setNotifOpen(!notifOpen)} aria-label="Notifications" style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 8px",cursor:"pointer",color:C.sub,display:"flex"}}><Bell size={14}/></button>
-              {alerts.length>0&&<div style={{position:"absolute",top:-4,right:-4,background:C.red,color:"#fff",width:15,height:15,borderRadius:"50%",fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{alerts.length}</div>}
-              {notifOpen&&(
-                <div style={{position:"absolute",right:0,top:34,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:12,width:280,boxShadow:"0 8px 32px rgba(0,0,0,0.3)",zIndex:200}}>
-                  <div style={{fontWeight:700,color:C.text,fontSize:12,marginBottom:8}}>🔔 Alerts ({alerts.length})</div>
-
-                  {/* Weekly digest reminder — shown prominently at the top */}
-                  {digestDue&&userProfile.role==="admin"&&(
-                    <div style={{background:C.yellow+"22",border:`1px solid ${C.yellow}44`,borderRadius:8,padding:"8px 10px",marginBottom:8}}>
-                      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                        <Mail size={12} style={{color:C.yellow,flexShrink:0}}/>
-                        <span style={{fontSize:11,color:C.yellow,fontWeight:700}}>Weekly Digest Due</span>
-                      </div>
-                      <div style={{fontSize:11,color:C.sub,marginBottom:6}}>
-                        {digestDaysSince===null
-                          ? "Never sent — remind recipients of active alerts"
-                          : `Last sent ${digestDaysSince} day${digestDaysSince!==1?"s":""} ago`}
-                      </div>
-                      <button
-                        onClick={()=>{setActive("notifications");setNotifOpen(false);}}
-                        style={{background:C.yellow,color:"#000",border:"none",borderRadius:6,padding:"4px 10px",fontSize:11,fontWeight:700,cursor:"pointer",width:"100%"}}>
-                        Go to Email Alerts →
-                      </button>
-                    </div>
-                  )}
-
-                  {alerts.filter(a=>!a.isDigest).slice(0,5).map((a,i)=>(
-                    <div key={i} style={{display:"flex",gap:7,alignItems:"center",padding:"5px 0",borderBottom:`1px solid ${C.border}44`}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:a.color,flexShrink:0}}/>
-                      <span style={{fontSize:11,color:C.sub}}>{a.msg}</span>
-                    </div>
-                  ))}
-                  {alerts.filter(a=>!a.isDigest).length===0&&!digestDue&&(
-                    <div style={{color:C.muted,fontSize:12}}>No active alerts 🎉</div>
-                  )}
-                </div>
-              )}
-            </div>
-            {/* PPT Generate Button */}
-            <button onClick={handleGeneratePPT} disabled={pptGenerating}
-              style={{background:pptGenerating?"#33415555":"linear-gradient(135deg,#0D9488,#6366f1)",color:"#fff",border:"none",borderRadius:8,padding:"6px 10px",cursor:pptGenerating?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5,fontSize:11,fontWeight:700,opacity:pptGenerating?0.6:1,whiteSpace:"nowrap",flexShrink:0}}>
-              {pptGenerating
-                ? <><span style={{width:10,height:10,borderRadius:"50%",border:"2px solid #fff",borderTopColor:"transparent",display:"inline-block",animation:"spin 0.8s linear infinite"}}/>{!isMobile&&" Generating..."}</>
-                : <>{!isMobile&&"📊 "}{!isMobile?"Export PPT":"📊"}</>
-              }
-            </button>
-            {!isOnline&&(
-              <div style={{background:"#ef444422",border:"1px solid #ef444444",borderRadius:8,padding:"4px 10px",fontSize:11,color:"#ef4444",fontWeight:700,display:"flex",alignItems:"center",gap:4}}>
-                <div style={{width:6,height:6,borderRadius:"50%",background:"#ef4444"}}/>
-                Offline
-              </div>
-            )}
-            {showInstall&&(
-              <button onClick={installPWA} style={{background:C.teal,color:"#fff",border:"none",borderRadius:8,padding:"5px 10px",fontSize:11,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
-                📱 Install App
-              </button>
-            )}
-            <button onClick={handleSignOut} aria-label="Sign out" title="Sign out" style={{background:C.red+"22",border:`1px solid ${C.red}44`,borderRadius:8,padding:"6px 8px",cursor:"pointer",color:C.red,display:"flex",alignItems:"center",gap:4,fontSize:11,fontWeight:600}}>
-              <LogOut size={12}/>{!isMobile&&"Logout"}
-            </button>
-          </div>
-        </header>
-        <main style={{flex:1,padding:isMobile?12:20,overflowY:"auto"}}>
-          {renderSection()}
-        </main>
-      </div>
-    </div>
+  return (
+    <AppContext.Provider value={contextValue}>
+      <AppRouter/>
+    </AppContext.Provider>
   );
 };
 
-export default function App(){
-  return <ErrorBoundary><AppInner/></ErrorBoundary>;
+// ── Root App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner/>
+    </ErrorBoundary>
+  );
 }
